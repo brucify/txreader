@@ -8,7 +8,7 @@ fn main() {
 
 fn run() {
     let args = cli::args();
-    let result = csv::read_file(&args.path)
+    let result = csv::parse_file(&args.path)
         .with_context(|| format!("Could not read file `{:?}`", &args.path));
     match result {
         Ok(_) => { println!("Done.") }

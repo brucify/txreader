@@ -1,8 +1,9 @@
-// use std::io::{Write};
+use std::io::{self, Write};
 use std::fs;
 use csv::{ReaderBuilder, Trim};
 use serde::Deserialize;
 use rayon::prelude::*;
+use std::sync::mpsc::channel;
 
 #[derive(Debug, Deserialize)]
 struct Transaction {
@@ -22,7 +23,7 @@ enum TransactionKind {
     Withdrawal,
     Dispute,
     Resolve,
-    Chargeback
+    Chargeback,
 }
 
 #[derive(Debug)]
@@ -34,20 +35,37 @@ struct Account {
     locked:     bool,
 }
 
-pub fn read_file(path: &std::path::PathBuf) -> std::io::Result<()> {
+pub fn parse_file(path: &std::path::PathBuf) -> io::Result<()> {
     let content = fs::read_to_string(path)?;
-
-    content.lines().collect::<Vec<&str>>().par_iter().for_each(|line| {
-        match maybe_parse_line(line) {
-            Some(transaction) => { println!("{:?}", transaction); },
-            None => { println!("None", ); },
-        }
+    let (tx, rx) = channel::<Transaction>();
+    content.lines()
+        .collect::<Vec<&str>>()
+        .par_iter()
+        .for_each_with(tx.clone(), |t, line| {
+            match maybe_parse_line(line) {
+                None => println!("None"),
+                Some(transaction) => {
+                    println!("{:?}", transaction);
+                    t.send(transaction).unwrap();
+                },
+            }
+        });
+    drop(tx);
+    rx.iter().for_each(|transaction| {
+        match transaction {
+            Transaction{kind: TransactionKind::Deposit, ..} => {},
+            Transaction{kind: TransactionKind::Withdrawal, ..} => {},
+            Transaction{kind: TransactionKind::Dispute, ..} => {},
+            Transaction{kind: TransactionKind::Resolve, ..} => {},
+            Transaction{kind: TransactionKind::Chargeback, ..} => {},
+        };
+        writeln!(io::stdout().lock(), "{:?}", transaction).unwrap();
     });
     Ok(())
 }
 
-// fn lock_and_writeln(line: &str) -> std::io::Result<()> {
-//     let stdout = std::io::stdout();
+// fn lock_and_writeln(line: &str) -> io::Result<()> {
+//     let stdout = io::stdout();
 //     let mut handle = stdout.lock();
 //     // println!("{}", line);
 //     writeln!(handle, "{}", line)
@@ -61,9 +79,8 @@ fn maybe_parse_line(data: &str) -> Option<Transaction> {
         .from_reader(data.as_bytes());
 
     match rdr.deserialize().next() {
-        Some(Ok(tx)) => {Some(tx)},
-        Some(Err(err)) => { println!("{:?}", err); None },
-        None => { None }
+        Some(Ok(transaction)) => Some(transaction),
+        _ => None,
     }
 }
 
@@ -75,7 +92,7 @@ mod test {
     #[test]
     fn should_open_file() {
         assert_eq!(
-            (|| match read_file(&std::path::PathBuf::from("transactions.csv")) {
+            (|| match parse_file(&std::path::PathBuf::from("transactions.csv")) {
                 Ok(()) => true,
                 _      => false,
             })(),
