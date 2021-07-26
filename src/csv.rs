@@ -1,11 +1,14 @@
-use std::io::{self, Write};
-use std::fs;
+use crate::csv::TransactionKind::*;
 use csv::{ReaderBuilder, Trim};
-use serde::Deserialize;
+use log::debug;
 use rayon::prelude::*;
+use serde::Deserialize;
+use std::collections::HashMap;
+use std::fs;
+use std::io::{self, Write, Error, ErrorKind::{InvalidInput}};
 use std::sync::mpsc::channel;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 struct Transaction {
     #[serde(rename = "type")]
     kind:       TransactionKind,
@@ -16,7 +19,7 @@ struct Transaction {
     amount:     Option<f64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, PartialEq)]
 #[serde(rename_all(deserialize = "lowercase"))]
 enum TransactionKind {
     Deposit,
@@ -26,7 +29,7 @@ enum TransactionKind {
     Chargeback,
 }
 
-#[derive(Debug)]
+#[derive(Debug, PartialEq)]
 struct Account {
     client_id:  u16,
     available:  f64,
@@ -35,39 +38,184 @@ struct Account {
     locked:     bool,
 }
 
+impl Account {
+    fn new(client_id: u16) -> Account {
+        Account {
+            client_id,
+            available: 0.0,
+            held:      0.0,
+            total:     0.0,
+            locked:    false
+        }
+    }
+}
+
 pub fn parse_file(path: &std::path::PathBuf) -> io::Result<()> {
+    let txns = file_to_txns(path)?;
+    debug!("txns: {:?}", txns);
+    let accounts = txns_to_accounts(txns);
+    accounts.iter().for_each(|a|
+        writeln!(io::stdout().lock(), "account: {:?}", a).unwrap()
+    );
+    Ok(())
+}
+
+fn file_to_txns(path: &std::path::PathBuf) -> io::Result<HashMap<u16, Vec<(usize, Transaction)>>> {
     let content = fs::read_to_string(path)?;
-    let (tx, rx) = channel::<Transaction>();
-    content.lines()
-        .collect::<Vec<&str>>()
+    let (tx0, rx0) = channel::<(usize, Transaction)>();
+    content.lines().enumerate().collect::<Vec<(usize, &str)>>()
         .par_iter()
-        .for_each_with(tx.clone(), |t, line| {
+        .for_each_with(tx0.clone(), |tx, (i, line)| {
             match maybe_parse_line(line) {
-                None => println!("None"),
+                None => debug!("maybe_parse_line: None"),
                 Some(transaction) => {
-                    println!("{:?}", transaction);
-                    t.send(transaction).unwrap();
+                    debug!("maybe_parse_line: {:?}", transaction);
+                    tx.send((*i, transaction)).unwrap();
                 },
             }
         });
-    drop(tx);
-    rx.iter().for_each(|transaction| {
-        match transaction {
-            Transaction{kind: TransactionKind::Deposit, ..} => {},
-            Transaction{kind: TransactionKind::Withdrawal, ..} => {},
-            Transaction{kind: TransactionKind::Dispute, ..} => {},
-            Transaction{kind: TransactionKind::Resolve, ..} => {},
-            Transaction{kind: TransactionKind::Chargeback, ..} => {},
-        };
-        writeln!(io::stdout().lock(), "{:?}", transaction).unwrap();
-    });
-    Ok(())
+    drop(tx0);
+
+    let txns: HashMap<u16, Vec<(usize, Transaction)>> = rx0.into_iter()
+        .fold(
+        HashMap::new() as HashMap<u16, Vec<(usize, Transaction)>>,
+        | mut accounts, (i, txn): (usize, Transaction) | {
+            accounts.entry(txn.client_id)
+                .or_insert(vec![])
+                .push((i, txn));
+            accounts
+        });
+    Ok(txns)
+}
+
+fn txns_to_accounts(txns: HashMap<u16, Vec<(usize, Transaction)>>) -> Vec<Account> {
+    let (tx0, rx0) = channel::<Account>();
+    txns.into_par_iter()
+        .for_each_with(tx0.clone(),
+            | tx, (client_id, mut client_txns): (u16, Vec<(usize, Transaction)>) | {
+                client_txns.par_sort_by_key(|(i, _)| *i);
+                let account = to_account(client_id, client_txns);
+                tx.send(account).unwrap();
+            });
+    drop(tx0);
+
+    rx0.iter().collect::<Vec<Account>>()
+}
+
+fn to_account(client_id: u16, client_txns: Vec<(usize, Transaction)>) -> Account {
+    let (_, account) = client_txns.iter()
+        .fold(
+            (HashMap::new(), Account::new(client_id)),
+            | (mut handled, mut account): (HashMap<u32, Vec<&Transaction>>, Account)
+            , (_i, txn): &(usize, Transaction)
+            | {
+                if let Ok(()) = handle_txn(&mut account, &handled, txn) {
+                    handled.entry(txn.tx_id).or_insert(vec![]).push(&txn); // only insert when txn ok
+                };
+                (handled, account)
+            }
+        );
+    account
+}
+
+fn handle_txn( account: &mut Account
+             , handled: &HashMap<u32, Vec<&Transaction>>
+             , txn:     &Transaction
+             ) -> io::Result<()> {
+    match txn {
+        &Transaction{ kind: Deposit, amount: Some(amount), .. } => {
+            (!account.locked).then(|| ())
+                .ok_or(Error::from(InvalidInput))?;
+            account.available += amount;
+            account.total     += amount;
+            Ok(())
+        },
+        &Transaction{ kind: Withdrawal, amount: Some(amount), .. } => {
+            (!account.locked && account.available >= amount).then(|| ())
+                .ok_or(Error::from(InvalidInput))?;
+            account.available -= amount;
+            account.total     -= amount;
+            Ok(())
+        },
+        &Transaction{ kind: Dispute, tx_id, .. } => {
+            let txns = handled.get(&tx_id)
+                .ok_or(Error::from(InvalidInput))?;
+            let dispute = is_under_dispute(txns);
+            let t = initial_txn(txns);
+            match (dispute, t) {
+                (false, Some(&Transaction{ amount: Some(amount), .. })) => {
+                    account.available -= amount;
+                    account.held      += amount;
+                    Ok(())
+                },
+                _ => {
+                    debug!("Not Done: {:?}", txn);
+                    Err(Error::from(InvalidInput))
+                }
+            }
+        },
+        &Transaction{ kind: Resolve, tx_id, .. } => {
+            let txns = handled.get(&tx_id)
+                .ok_or(Error::from(InvalidInput))?;
+            let dispute = is_under_dispute(txns);
+            let t = initial_txn(txns);
+            match (dispute, t) {
+                (true, Some(&Transaction{ amount: Some(amount), .. })) => {
+                    account.available += amount;
+                    account.held      -= amount;
+                    Ok(())
+                },
+                _ => {
+                    debug!("Not Done: {:?}", txn);
+                    Err(Error::from(InvalidInput))
+                }
+            }
+        },
+        &Transaction{ kind: Chargeback, tx_id, .. } => {
+            let txns = handled.get(&tx_id)
+                .ok_or(Error::from(InvalidInput))?;
+            let dispute = is_under_dispute(txns);
+            let t = initial_txn(txns);
+            match (dispute, t) {
+                (true, Some(&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
+                    account.held   -= amount;
+                    account.total  -= amount;
+                    account.locked  = true;
+                    Ok(())
+                },
+                (true, Some(&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
+                    account.held   -= amount;
+                    account.total  += amount;
+                    account.locked  = true;
+                    Ok(())
+                },
+                _ => {
+                    debug!("Not Done: {:?}", txn);
+                    Err(Error::from(InvalidInput))
+                }
+            }
+        },
+        _ => {
+            debug!("Not Done: {:?}", txn);
+            Err(Error::from(InvalidInput))
+        }
+    }
+}
+
+fn is_under_dispute(txns: &Vec<&Transaction>) -> bool {
+    let n_dispute = txns.iter().filter(|t| t.kind == Dispute).count();
+    let n_resolve = txns.iter().filter(|t| t.kind == Resolve).count();
+    n_dispute > n_resolve
+}
+
+fn initial_txn<'a>(txns: &'a Vec<&'a Transaction>) -> Option<&'a &Transaction> {
+    txns.iter().filter(|t| t.kind == Withdrawal || t.kind == Deposit).next()
 }
 
 // fn lock_and_writeln(line: &str) -> io::Result<()> {
 //     let stdout = io::stdout();
 //     let mut handle = stdout.lock();
-//     // println!("{}", line);
+//     // debug!("{}", line);
 //     writeln!(handle, "{}", line)
 // }
 
@@ -86,55 +234,162 @@ fn maybe_parse_line(data: &str) -> Option<Transaction> {
 
 #[cfg(test)]
 mod test {
+    use common_macros::hash_map;
     use crate::csv::*;
-    use matches::*;
+    use tempfile::NamedTempFile;
 
     #[test]
-    fn should_open_file() {
-        assert_eq!(
-            (|| match parse_file(&std::path::PathBuf::from("transactions.csv")) {
-                Ok(()) => true,
-                _      => false,
-            })(),
-            true
-        )
+    fn should_parse_file() -> io::Result<()> {
+        assert_eq!(parse_file(&std::path::PathBuf::from("transactions.csv"))?, ());
+        Ok(())
+    }
+
+    #[test]
+    fn should_parse_file_into_txns() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,1.0
+                        deposit,2,2,2.0
+                        deposit,1,3,2.0
+                        withdrawal,1,4,1.5
+                        withdrawal,2,5,3.0
+                        dispute,4,4,
+                        resolve,4,4,
+                        chargeback,5,5,
+                        bad line
+                        deposit,x,x,2.0")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let mut txns = file_to_txns(&std::path::PathBuf::from(path)).unwrap();
+
+        /*
+         * Then
+         */
+        txns.iter_mut().for_each(|(_k, v)| v.sort_by_key(|(i, _)| *i) );
+        assert_eq!(txns.get(&1), Some(&vec![ (1, Transaction{ kind: Deposit, client_id: 1, tx_id: 1, amount: Some(1.0) })
+                                             , (3, Transaction{ kind: Deposit, client_id: 1, tx_id: 3, amount: Some(2.0) })
+                                             , (4, Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4, amount: Some(1.5) })
+                                             ]));
+        assert_eq!(txns.get(&2), Some(&vec![ (2, Transaction{ kind: Deposit, client_id: 2, tx_id: 2, amount: Some(2.0) })
+                                             , (5, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 5, amount: Some(3.0) })
+                                             ]));
+        assert_eq!(txns.get(&3), None);
+        assert_eq!(txns.get(&4), Some(&vec![ (6, Transaction{ kind: Dispute, client_id: 4, tx_id: 4, amount: None })
+                                             , (7, Transaction{ kind: Resolve, client_id: 4, tx_id: 4, amount: None })
+                                             ]));
+        assert_eq!(txns.get(&5), Some(&vec![ (8, Transaction{ kind: Chargeback, client_id: 5, tx_id: 5, amount: None })
+                                             ]));
+        Ok(())
+    }
+
+    #[test]
+    fn should_parse_txns_into_accounts() {
+        /*
+         * Given
+         */
+        let txns =
+            hash_map!( 1 => vec![ (1,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(1.0) }) // +1
+                                , (3,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(2.0) }) // +2
+                                , (4,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(1.5) }) // -1.5
+                                , (5,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(10.0) }) // ignore
+                                , (6,  Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None }) // ignore
+                                , (6,  Transaction{ kind: Chargeback, client_id: 1, tx_id: 3,   amount: None }) // ignore
+                                , (7,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None }) // hold 2
+                                , (8,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None }) // ignore
+                                , (9,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 100, amount: None }) // ignore
+                                , (10, Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None }) // release 2
+                                , (11, Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None }) // hold 1.5
+                                , (12, Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None }) // revert 1.5, freeze
+                                , (13, Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(2.0) }) // ignore
+                                ]
+                     , 2 => vec![ (14, Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(5.0) }) // +5
+                                , (15, Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(10.0) }) // +10
+                                , (16, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(1.5) }) // -1.5
+                                , (17, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(10.0) }) // -10
+                                , (18, Transaction{ kind: Resolve,    client_id: 2, tx_id: 103, amount: None }) // ignore
+                                , (19, Transaction{ kind: Chargeback, client_id: 2, tx_id: 103, amount: None }) // ignore
+                                , (20, Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None }) // hold 10
+                                , (21, Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None }) // hold 5
+                                , (22, Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None }) // ignore
+                                , (23, Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None }) // release 5
+                                , (24, Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None }) // hold 5
+                                , (25, Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None }) // revert 10, freeze
+                                , (26, Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(20.0) }) // ignore
+                                ]);
+        /*
+         * When
+         */
+        let mut accounts = txns_to_accounts(txns);
+
+        /*
+         * Then
+         */
+        accounts.sort_by_key(|a| a.client_id);
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: 0.0
+                                          , held:      0.0
+                                          , total:     3.0
+                                          , locked:    true
+                                          }
+                                 , Account{ client_id: 2
+                                          , available: -11.5
+                                          , held:      5.0
+                                          , total:     -6.5
+                                          , locked:    true
+                                          }
+                                 ]);
     }
 
     #[test]
     fn should_parse_line() {
         let data = "deposit,1,1,1.0";
-        assert_matches!(maybe_parse_line(data), Some(Transaction{ kind:      TransactionKind::Deposit
-                                                                , client_id: 1
-                                                                , tx_id:     1
-                                                                , amount:    Some(x)
-                                                                }) if x == 1.0);
+        assert_eq!(maybe_parse_line(data), Some(Transaction{ kind:      Deposit
+                                                           , client_id: 1
+                                                           , tx_id:     1
+                                                           , amount:    Some(1.0)
+                                                           }));
         let data = "withdrawal,2,2,2.0";
-        assert_matches!(maybe_parse_line(data), Some(Transaction{ kind:      TransactionKind::Withdrawal
-                                                                , client_id: 2
-                                                                , tx_id:     2
-                                                                , amount:    Some(x)
-                                                                }) if x == 2.0);
+        assert_eq!(maybe_parse_line(data), Some(Transaction{ kind:      Withdrawal
+                                                           , client_id: 2
+                                                           , tx_id:     2
+                                                           , amount:    Some(2.0)
+                                                           }));
         let data = "dispute,3,3,";
-        assert_matches!(maybe_parse_line(data), Some(Transaction{ kind:      TransactionKind::Dispute
-                                                                , client_id: 3
-                                                                , tx_id:     3
-                                                                , amount:    None
-                                                                }));
+        assert_eq!(maybe_parse_line(data), Some(Transaction{ kind:      Dispute
+                                                           , client_id: 3
+                                                           , tx_id:     3
+                                                           , amount:    None
+                                                           }));
         let data = "resolve,4,4,";
-        assert_matches!(maybe_parse_line(data), Some(Transaction{ kind:      TransactionKind::Resolve
-                                                                , client_id: 4
-                                                                , tx_id:     4
-                                                                , amount:    None
-                                                                }));
+        assert_eq!(maybe_parse_line(data), Some(Transaction{ kind:      Resolve
+                                                           , client_id: 4
+                                                           , tx_id:     4
+                                                           , amount:    None
+                                                           }));
         let data = "chargeback,5,5,";
-        assert_matches!(maybe_parse_line(data), Some(Transaction{ kind:      TransactionKind::Chargeback
-                                                                , client_id: 5
-                                                                , tx_id:     5
-                                                                , amount:    None
-                                                                }));
+        assert_eq!(maybe_parse_line(data), Some(Transaction{ kind:      Chargeback
+                                                           , client_id: 5
+                                                           , tx_id:     5
+                                                           , amount:    None
+                                                           }));
         let data = "bad line";
-        assert_matches!(maybe_parse_line(data), None);
+        assert_eq!(maybe_parse_line(data), None);
         let data = "chargeback,5,5";
-        assert_matches!(maybe_parse_line(data), None);
+        assert_eq!(maybe_parse_line(data), None);
+        // let data = "deposit,1,1,1.0,1.0";
+        // assert_eq!(maybe_parse_line(data), None);
+        let data = "deposit,x,1,1.0";
+        assert_eq!(maybe_parse_line(data), None);
+        let data = "deposit,1,x,1.0";
+        assert_eq!(maybe_parse_line(data), None);
+        let data = "deposit,1,1,x";
+        assert_eq!(maybe_parse_line(data), None);
     }
+
 }
