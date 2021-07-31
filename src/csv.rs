@@ -6,7 +6,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write, Error, ErrorKind::{InvalidInput}};
-use std::sync::mpsc::channel;
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct Transaction {
@@ -72,13 +71,13 @@ fn file_to_txns_map(path: &std::path::PathBuf) -> io::Result<HashMap<u16, Vec<(u
             .enumerate()
             .fold(
                 HashMap::new() as HashMap<u16, Vec<(usize, Transaction)>>,
-                | mut accounts
+                | mut acc
                 , (i, txn): (usize, Transaction)
                 | {
-                    accounts.entry(txn.client_id)
+                    acc.entry(txn.client_id)
                         .or_insert(vec![])
                         .push((i, txn));
-                    accounts
+                    acc
                 });
     Ok(txns_map)
 }
@@ -97,17 +96,9 @@ fn maybe_parse_line(data: &str) -> Option<Transaction> {
 }
 
 fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<(usize, Transaction)>>) -> Vec<Account> {
-    let (tx0, rx0) = channel::<Account>();
     txns_map.into_par_iter()
-        .for_each_with(tx0.clone(),
-            | tx, (client_id, mut client_txns): (u16, Vec<(usize, Transaction)>) | {
-                client_txns.par_sort_by_key(|(i, _)| *i);
-                let account = to_account(client_id, client_txns);
-                tx.send(account).unwrap();
-            });
-    drop(tx0);
-
-    rx0.iter().collect::<Vec<Account>>()
+        .map(| (client_id, client_txns) | to_account(client_id, client_txns))
+        .collect()
 }
 
 fn to_account(client_id: u16, client_txns: Vec<(usize, Transaction)>) -> Account {
