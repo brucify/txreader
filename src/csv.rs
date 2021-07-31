@@ -2,7 +2,7 @@ use crate::csv::TransactionKind::*;
 use csv::{ReaderBuilder, Trim};
 use log::debug;
 use rayon::prelude::*;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
 use std::io::{self, Write, Error, ErrorKind::{InvalidInput}};
@@ -29,7 +29,7 @@ enum TransactionKind {
     Chargeback,
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Serialize, PartialEq)]
 struct Account {
     client_id:  u16,
     available:  f64,
@@ -51,46 +51,54 @@ impl Account {
 }
 
 pub fn parse_file(path: &std::path::PathBuf) -> io::Result<()> {
-    let txns = file_to_txns(path)?;
-    debug!("txns: {:?}", txns);
-    let accounts = txns_to_accounts(txns);
-    accounts.iter().for_each(|a|
+    let txns_map = file_to_txns_map(path)?;
+    debug!("txns: {:?}", txns_map);
+    let accounts = txns_map_to_accounts(txns_map);
+    accounts.par_iter().for_each(|a|
         writeln!(io::stdout().lock(), "account: {:?}", a).unwrap()
     );
     Ok(())
 }
 
-fn file_to_txns(path: &std::path::PathBuf) -> io::Result<HashMap<u16, Vec<(usize, Transaction)>>> {
+fn file_to_txns_map(path: &std::path::PathBuf) -> io::Result<HashMap<u16, Vec<(usize, Transaction)>>> {
     let content = fs::read_to_string(path)?;
-    let (tx0, rx0) = channel::<(usize, Transaction)>();
-    content.lines().enumerate().collect::<Vec<(usize, &str)>>()
-        .par_iter()
-        .for_each_with(tx0.clone(), |tx, (i, line)| {
-            match maybe_parse_line(line) {
-                None => debug!("maybe_parse_line: None"),
-                Some(transaction) => {
-                    debug!("maybe_parse_line: {:?}", transaction);
-                    tx.send((*i, transaction)).unwrap();
-                },
-            }
-        });
-    drop(tx0);
+    let valid_lines: Vec<Transaction> =
+        content.par_lines()
+            .filter_map(|line| maybe_parse_line(line))
+            .collect();
 
-    let txns: HashMap<u16, Vec<(usize, Transaction)>> = rx0.into_iter()
-        .fold(
-        HashMap::new() as HashMap<u16, Vec<(usize, Transaction)>>,
-        | mut accounts, (i, txn): (usize, Transaction) | {
-            accounts.entry(txn.client_id)
-                .or_insert(vec![])
-                .push((i, txn));
-            accounts
-        });
-    Ok(txns)
+    let txns_map: HashMap<u16, Vec<(usize, Transaction)>> =
+        valid_lines.into_iter()
+            .enumerate()
+            .fold(
+                HashMap::new() as HashMap<u16, Vec<(usize, Transaction)>>,
+                | mut accounts
+                , (i, txn): (usize, Transaction)
+                | {
+                    accounts.entry(txn.client_id)
+                        .or_insert(vec![])
+                        .push((i, txn));
+                    accounts
+                });
+    Ok(txns_map)
 }
 
-fn txns_to_accounts(txns: HashMap<u16, Vec<(usize, Transaction)>>) -> Vec<Account> {
+fn maybe_parse_line(data: &str) -> Option<Transaction> {
+    let mut rdr = ReaderBuilder::new()
+        .has_headers(false)
+        .delimiter(b',')
+        .trim(Trim::All)
+        .from_reader(data.as_bytes());
+
+    match rdr.deserialize().next() {
+        Some(Ok(transaction)) => Some(transaction),
+        _ => None,
+    }
+}
+
+fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<(usize, Transaction)>>) -> Vec<Account> {
     let (tx0, rx0) = channel::<Account>();
-    txns.into_par_iter()
+    txns_map.into_par_iter()
         .for_each_with(tx0.clone(),
             | tx, (client_id, mut client_txns): (u16, Vec<(usize, Transaction)>) | {
                 client_txns.par_sort_by_key(|(i, _)| *i);
@@ -219,19 +227,6 @@ fn initial_txn<'a>(txns: &'a Vec<&'a Transaction>) -> Option<&'a &Transaction> {
 //     writeln!(handle, "{}", line)
 // }
 
-fn maybe_parse_line(data: &str) -> Option<Transaction> {
-    let mut rdr = ReaderBuilder::new()
-        .has_headers(false)
-        .delimiter(b',')
-        .trim(Trim::All)
-        .from_reader(data.as_bytes());
-
-    match rdr.deserialize().next() {
-        Some(Ok(transaction)) => Some(transaction),
-        _ => None,
-    }
-}
-
 #[cfg(test)]
 mod test {
     use common_macros::hash_map;
@@ -239,13 +234,13 @@ mod test {
     use tempfile::NamedTempFile;
 
     #[test]
-    fn should_parse_file() -> io::Result<()> {
+    fn test_parse_file() -> io::Result<()> {
         assert_eq!(parse_file(&std::path::PathBuf::from("transactions.csv"))?, ());
         Ok(())
     }
 
     #[test]
-    fn should_parse_file_into_txns() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_file_to_txns() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -266,30 +261,30 @@ mod test {
         /*
          * When
          */
-        let mut txns = file_to_txns(&std::path::PathBuf::from(path)).unwrap();
+        let mut txns = file_to_txns_map(&std::path::PathBuf::from(path)).unwrap();
 
         /*
          * Then
          */
         txns.iter_mut().for_each(|(_k, v)| v.sort_by_key(|(i, _)| *i) );
-        assert_eq!(txns.get(&1), Some(&vec![ (1, Transaction{ kind: Deposit, client_id: 1, tx_id: 1, amount: Some(1.0) })
-                                             , (3, Transaction{ kind: Deposit, client_id: 1, tx_id: 3, amount: Some(2.0) })
-                                             , (4, Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4, amount: Some(1.5) })
+        assert_eq!(txns.get(&1), Some(&vec![ (0, Transaction{ kind: Deposit, client_id: 1, tx_id: 1, amount: Some(1.0) })
+                                             , (2, Transaction{ kind: Deposit, client_id: 1, tx_id: 3, amount: Some(2.0) })
+                                             , (3, Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4, amount: Some(1.5) })
                                              ]));
-        assert_eq!(txns.get(&2), Some(&vec![ (2, Transaction{ kind: Deposit, client_id: 2, tx_id: 2, amount: Some(2.0) })
-                                             , (5, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 5, amount: Some(3.0) })
+        assert_eq!(txns.get(&2), Some(&vec![ (1, Transaction{ kind: Deposit, client_id: 2, tx_id: 2, amount: Some(2.0) })
+                                             , (4, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 5, amount: Some(3.0) })
                                              ]));
         assert_eq!(txns.get(&3), None);
-        assert_eq!(txns.get(&4), Some(&vec![ (6, Transaction{ kind: Dispute, client_id: 4, tx_id: 4, amount: None })
-                                             , (7, Transaction{ kind: Resolve, client_id: 4, tx_id: 4, amount: None })
+        assert_eq!(txns.get(&4), Some(&vec![ (5, Transaction{ kind: Dispute, client_id: 4, tx_id: 4, amount: None })
+                                             , (6, Transaction{ kind: Resolve, client_id: 4, tx_id: 4, amount: None })
                                              ]));
-        assert_eq!(txns.get(&5), Some(&vec![ (8, Transaction{ kind: Chargeback, client_id: 5, tx_id: 5, amount: None })
+        assert_eq!(txns.get(&5), Some(&vec![ (7, Transaction{ kind: Chargeback, client_id: 5, tx_id: 5, amount: None })
                                              ]));
         Ok(())
     }
 
     #[test]
-    fn should_parse_txns_into_accounts() {
+    fn test_txns_to_accounts() {
         /*
          * Given
          */
@@ -325,7 +320,7 @@ mod test {
         /*
          * When
          */
-        let mut accounts = txns_to_accounts(txns);
+        let mut accounts = txns_map_to_accounts(txns);
 
         /*
          * Then
@@ -347,7 +342,7 @@ mod test {
     }
 
     #[test]
-    fn should_parse_line() {
+    fn test_maybe_parse_line() {
         let data = "deposit,1,1,1.0";
         assert_eq!(maybe_parse_line(data), Some(Transaction{ kind:      Deposit
                                                            , client_id: 1
