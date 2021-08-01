@@ -12,7 +12,7 @@ fn run() {
     let args = cli::args();
     match csv::parse_file(&args.path)
         .with_context(|| format!("Could not read file `{:?}`", &args.path)) {
-        Ok(_) => { info!("Done.") }
-        Err(error) => { error!("Error: {:?}", error) }
+        Ok(_) => info!("Done."),
+        Err(error) => error!("Error: {:?}", error)
     }
 }

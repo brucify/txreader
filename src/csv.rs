@@ -1,5 +1,5 @@
 use crate::csv::TransactionKind::*;
-use csv::{ReaderBuilder, Trim};
+use csv::{ReaderBuilder, Trim, WriterBuilder};
 use log::debug;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
@@ -51,11 +51,9 @@ impl Account {
 
 pub fn parse_file(path: &std::path::PathBuf) -> io::Result<()> {
     let txns_map = file_to_txns_map(path)?;
-    debug!("txns: {:?}", txns_map);
+    debug!("Transactions by client: {:?}", txns_map);
     let accounts = txns_map_to_accounts(txns_map);
-    accounts.par_iter().for_each(|a|
-        writeln!(io::stdout().lock(), "account: {:?}", a).unwrap()
-    );
+    print_accounts(&accounts)?;
     Ok(())
 }
 
@@ -90,6 +88,19 @@ fn maybe_parse_line(data: &str) -> Option<Transaction> {
         Some(Ok(transaction)) => Some(transaction),
         _ => None,
     }
+}
+
+fn print_accounts(accounts: &Vec<Account>) -> io::Result<()>{
+    writeln!(io::stdout().lock(), "client_id,available,held,total,locked")?;
+    accounts.par_iter().for_each(|account| {
+        let mut wtr = WriterBuilder::new()
+            .has_headers(false)
+            .from_writer(vec![]);
+        wtr.serialize(account).unwrap();
+        let data = String::from_utf8(wtr.into_inner().unwrap()).unwrap();
+        write!(io::stdout().lock(), "{}", data).unwrap();
+    });
+    Ok(())
 }
 
 fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<Transaction>>) -> Vec<Account> {
@@ -145,7 +156,7 @@ fn handle_txn( account: &mut Account
                     Ok(())
                 },
                 _ => {
-                    debug!("Not Done: {:?}", txn);
+                    debug!("Invalid transaction: {:?}", txn);
                     Err(Error::from(InvalidInput))
                 }
             }
@@ -162,7 +173,7 @@ fn handle_txn( account: &mut Account
                     Ok(())
                 },
                 _ => {
-                    debug!("Not Done: {:?}", txn);
+                    debug!("Invalid transaction: {:?}", txn);
                     Err(Error::from(InvalidInput))
                 }
             }
@@ -186,13 +197,13 @@ fn handle_txn( account: &mut Account
                     Ok(())
                 },
                 _ => {
-                    debug!("Not Done: {:?}", txn);
+                    debug!("Invalid transaction: {:?}", txn);
                     Err(Error::from(InvalidInput))
                 }
             }
         },
         _ => {
-            debug!("Not Done: {:?}", txn);
+            debug!("Invalid transaction: {:?}", txn);
             Err(Error::from(InvalidInput))
         }
     }
@@ -208,12 +219,6 @@ fn initial_txn<'a>(txns: &'a Vec<&'a Transaction>) -> Option<&'a &Transaction> {
     txns.iter().filter(|t| t.kind == Withdrawal || t.kind == Deposit).next()
 }
 
-// fn lock_and_writeln(line: &str) -> io::Result<()> {
-//     let stdout = io::stdout();
-//     let mut handle = stdout.lock();
-//     // debug!("{}", line);
-//     writeln!(handle, "{}", line)
-// }
 
 #[cfg(test)]
 mod test {
