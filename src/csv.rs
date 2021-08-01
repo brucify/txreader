@@ -68,7 +68,7 @@ fn file_to_txns_map(path: &std::path::PathBuf) -> io::Result<HashMap<u16, Vec<Tr
         valid_lines.into_iter().fold(
             HashMap::new(),
             | mut acc, txn: Transaction| {
-                // assumes the transactions are in good order
+                // assumes transactions are in good order
                 acc.entry(txn.client_id)
                     .or_insert(vec![])
                     .push(txn);
@@ -92,15 +92,17 @@ fn maybe_parse_line(data: &str) -> Option<Transaction> {
 
 fn print_accounts(accounts: &Vec<Account>) -> io::Result<()>{
     writeln!(io::stdout().lock(), "client_id,available,held,total,locked")?;
-    accounts.par_iter().for_each(|account| {
-        let mut wtr = WriterBuilder::new()
-            .has_headers(false)
-            .from_writer(vec![]);
-        wtr.serialize(account).unwrap();
-        let data = String::from_utf8(wtr.into_inner().unwrap()).unwrap();
-        write!(io::stdout().lock(), "{}", data).unwrap();
-    });
+    accounts.par_iter().for_each(|account| maybe_print_account(account));
     Ok(())
+}
+
+fn maybe_print_account(account: &Account) {
+    let mut wtr = WriterBuilder::new()
+        .has_headers(false)
+        .from_writer(vec![]);
+    wtr.serialize(account).unwrap();
+    let data = String::from_utf8(wtr.into_inner().unwrap()).unwrap();
+    write!(io::stdout().lock(), "{}", data).unwrap();
 }
 
 fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<Transaction>>) -> Vec<Account> {
@@ -110,16 +112,17 @@ fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<Transaction>>) -> Vec<Account
 }
 
 fn to_account(client_id: u16, client_txns: Vec<Transaction>) -> Account {
-    let (_, account) =
+    let (account, _) =
         client_txns.iter().fold(
-            (HashMap::new(), Account::new(client_id)),
-            | (mut handled, mut account): (HashMap<u32, Vec<&Transaction>>, Account)
+            (Account::new(client_id), HashMap::new()),
+            | (mut account, mut handled): (Account, HashMap<u32, Vec<&Transaction>>)
             , txn: &Transaction
             | {
-                if let Ok(()) = handle_txn(&mut account, &handled, txn) {
-                    handled.entry(txn.tx_id).or_insert(vec![]).push(&txn); // only insert when txn ok
+                match handle_txn(&mut account, &handled, txn) {
+                    Ok(()) => handled.entry(txn.tx_id).or_insert(vec![]).push(&txn), // only insert when txn ok
+                    _ => debug!("Invalid transaction: {:?}", txn)
                 };
-                (handled, account)
+                (account, handled)
             }
         );
     account
@@ -155,10 +158,7 @@ fn handle_txn( account: &mut Account
                     account.held      += amount;
                     Ok(())
                 },
-                _ => {
-                    debug!("Invalid transaction: {:?}", txn);
-                    Err(Error::from(InvalidInput))
-                }
+                _ => Err(Error::from(InvalidInput))
             }
         },
         &Transaction{ kind: Resolve, tx_id, .. } => {
@@ -172,10 +172,7 @@ fn handle_txn( account: &mut Account
                     account.held      -= amount;
                     Ok(())
                 },
-                _ => {
-                    debug!("Invalid transaction: {:?}", txn);
-                    Err(Error::from(InvalidInput))
-                }
+                _ => Err(Error::from(InvalidInput))
             }
         },
         &Transaction{ kind: Chargeback, tx_id, .. } => {
@@ -196,16 +193,10 @@ fn handle_txn( account: &mut Account
                     account.locked  = true;
                     Ok(())
                 },
-                _ => {
-                    debug!("Invalid transaction: {:?}", txn);
-                    Err(Error::from(InvalidInput))
-                }
+                _ => Err(Error::from(InvalidInput))
             }
         },
-        _ => {
-            debug!("Invalid transaction: {:?}", txn);
-            Err(Error::from(InvalidInput))
-        }
+        _ => Err(Error::from(InvalidInput))
     }
 }
 
