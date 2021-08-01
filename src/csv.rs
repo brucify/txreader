@@ -125,61 +125,122 @@ fn handle_txn( account: &mut Account
         &Transaction{ kind: Deposit, amount: Some(amount), .. } => {
             (!account.locked).then(|| ())
                 .ok_or(Error::from(InvalidInput))?;
+            // A deposit is a credit to the client's asset account,
+            // meaning it should increase the available and total
+            // funds of the client account
             account.available += amount;
             account.total     += amount;
             Ok(())
         },
         &Transaction{ kind: Withdrawal, amount: Some(amount), .. } => {
+            // If a client does not have sufficient available funds
+            // the withdrawal should fail and the total amount of
+            // funds should not change
             (!account.locked && account.available >= amount).then(|| ())
                 .ok_or(Error::from(InvalidInput))?;
+            // A withdraw is a debit to the client's asset account,
+            // meaning it should decrease the available and total
+            // funds of the client account
             account.available -= amount;
             account.total     -= amount;
             Ok(())
         },
         &Transaction{ kind: Dispute, tx_id, .. } => {
-            let txns = handled.get(&tx_id)
-                .ok_or(Error::from(InvalidInput))?;
+            // Notice that a dispute does not state the amount disputed.
+            // Instead a dispute references the transaction that is
+            // disputed by ID.
+            let txns = handled.get(&tx_id).ok_or(Error::from(InvalidInput))?;
+            // If the tx specified by the dispute doesn't exist you can
+            // ignore it and assume this is an error on our partners side.
             let dispute = is_under_dispute(txns);
             let initial_txn = initial_txn(txns);
             match (dispute, initial_txn) {
-                (false, Some(&Transaction{ amount: Some(amount), .. })) => {
+                (false, Some(&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
+                    // A dispute represents a client's claim that a
+                    // transaction was erroneous and should be reversed.
+                    // The transaction shouldn't be reversed yet but
+                    // the associated funds should be held. This means
+                    // that the clients available funds should decrease
+                    // by the amount disputed, their held funds should
+                    // increase by the amount disputed, while their
+                    // total funds should remain the same.
                     account.available -= amount;
                     account.held      += amount;
+                    Ok(())
+                },
+                (false, Some(&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
+                    // NOTE: Assumes a dispute on a withdrawal temporarily
+                    // puts funds into the client's held funds.
+                    account.held      += amount;
+                    account.total     += amount;
                     Ok(())
                 },
                 _ => Err(Error::from(InvalidInput))
             }
         },
         &Transaction{ kind: Resolve, tx_id, .. } => {
-            let txns = handled.get(&tx_id)
-                .ok_or(Error::from(InvalidInput))?;
+            // Like disputes, resolves do not specify an amount. Instead
+            // they refer to a transaction that was under dispute by ID.
+            let txns = handled.get(&tx_id).ok_or(Error::from(InvalidInput))?;
+            // If the tx specified doesn't exist, or the tx isn't under
+            // dispute, you can ignore the resolve and assume this is an
+            // error on our partner's side.
             let dispute = is_under_dispute(txns);
             let initial_txn = initial_txn(txns);
             match (dispute, initial_txn) {
-                (true, Some(&Transaction{ amount: Some(amount), .. })) => {
+                (true, Some(&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
+                    // A resolve represents a resolution to a dispute,
+                    // releasing the associated held funds. Funds that
+                    // were previously disputed are no longer disputed.
+                    // This means that the clients held funds should
+                    // decrease by the amount no longer disputed, their
+                    // available funds should increase by the amount no
+                    // longer disputed, and their total funds should
+                    // remain the same.
                     account.available += amount;
                     account.held      -= amount;
+                    Ok(())
+                },
+                (true, Some(&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
+                    // NOTE: Assumes a resolve removes the temporarily
+                    // increased funds from the client's held funds.
+                    account.held      -= amount;
+                    account.total     -= amount;
                     Ok(())
                 },
                 _ => Err(Error::from(InvalidInput))
             }
         },
         &Transaction{ kind: Chargeback, tx_id, .. } => {
-            let txns = handled.get(&tx_id)
-                .ok_or(Error::from(InvalidInput))?;
+            // Like a dispute and a resolve a chargeback refers to the
+            // transaction by ID (tx) and does not specify an amount.
+            let txns = handled.get(&tx_id).ok_or(Error::from(InvalidInput))?;
+            // Like a resolve, if the tx specified doesn't exist, or
+            // the tx isn't under dispute, you can ignore chargeback
+            // and assume this is an error on our partner's side.
             let dispute = is_under_dispute(txns);
             let initial_txn = initial_txn(txns);
             match (dispute, initial_txn) {
                 (true, Some(&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
+                    // A chargeback is the final state of a dispute and
+                    // represents the client reversing a transaction.
+                    // Funds that were held have now been withdrawn.
+                    // This means that the clients held funds and total
+                    // funds should decrease by the amount previously
+                    // disputed. If a chargeback occurs the client's
+                    // account should be immediately frozen.
                     account.held   -= amount;
                     account.total  -= amount;
                     account.locked  = true;
                     Ok(())
                 },
                 (true, Some(&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
-                    account.held   -= amount;
-                    account.total  += amount;
-                    account.locked  = true;
+                    // NOTE: Assumes a chargeback to a withdrawal reverses
+                    // a withdrawal, and puts the temporarily held funds
+                    // back to the client available funds.
+                    account.available += amount;
+                    account.held      -= amount;
+                    account.locked     = true;
                     Ok(())
                 },
                 _ => Err(Error::from(InvalidInput))
@@ -272,7 +333,7 @@ mod test {
     }
 
     #[test]
-    fn test_txns_to_accounts() {
+    fn test_txns_map_to_accounts() {
         /*
          * Given
          */
@@ -315,7 +376,7 @@ mod test {
          */
         accounts.sort_by_key(|a| a.client_id);
         assert_eq!(accounts, vec![ Account{ client_id: 1
-                                          , available: 0.0
+                                          , available: 3.0
                                           , held:      0.0
                                           , total:     3.0
                                           , locked:    true
@@ -353,6 +414,10 @@ mod test {
          * When
          */
         let mut txns = read_txns(&std::path::PathBuf::from(path))?;
+
+        /*
+         * Then
+         */
         txns.sort_by_key(|(i, _)| *i);
         let mut iter = txns.into_iter();
         assert_eq!(iter.next(), Some((0, Transaction{ kind:      Deposit
