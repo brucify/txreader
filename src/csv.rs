@@ -59,6 +59,9 @@ pub fn parse_file(path: &std::path::PathBuf) -> io::Result<()> {
     Ok(())
 }
 
+/// Reads the file from path in parallel into a unordered
+/// `Vec<(usize, Transaction)`, where the `usize` is the
+/// original index of the Transaction.
 fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<(usize, Transaction)>> {
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
@@ -80,6 +83,9 @@ fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<(usize, Transaction)>>
     Ok(all_txns)
 }
 
+/// Returns a `HashMap` where the key is a `u16` client id,
+/// and the value is a `Vec<(usize, Transaction)` that
+/// belongs to the client.
 fn txns_to_map(all_txns: Vec<(usize, Transaction)>) -> HashMap<u16, Vec<(usize, Transaction)>> {
     all_txns.into_iter().fold(
         HashMap::new(),
@@ -93,6 +99,8 @@ fn txns_to_map(all_txns: Vec<(usize, Transaction)>) -> HashMap<u16, Vec<(usize, 
         })
 }
 
+/// Reads the `HashMap` in parallel, and returns a list of
+/// accounts as `Vec<Account>`.
 fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<(usize, Transaction)>>) -> Vec<Account> {
     txns_map.into_par_iter()
         .map(| (client_id, mut client_txns) | {
@@ -102,6 +110,8 @@ fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<(usize, Transaction)>>) -> Ve
         .collect()
 }
 
+/// Reads a sorted list of `Transaction`, and returns an
+/// `Account` for a client.
 fn to_account(client_id: u16, client_txns: Vec<(usize, Transaction)>) -> Account {
     let (account, _) =
         client_txns.iter().fold(
@@ -119,13 +129,15 @@ fn to_account(client_id: u16, client_txns: Vec<(usize, Transaction)>) -> Account
     account
 }
 
+/// Handles a `Transaction` and updates the client's
+/// `Account`
 fn handle_txn( account: &mut Account
              , handled: &HashMap<u32, Vec<&Transaction>>
              , txn:     &Transaction
              ) -> io::Result<()> {
     match txn {
         &Transaction{ kind: Deposit, amount: Some(amount), .. } => {
-            (!account.locked).then(|| ())
+            (!account.locked && amount.is_sign_positive()).then(|| ())
                 .ok_or(Error::from(InvalidInput))?;
             // A deposit is a credit to the client's asset account,
             // meaning it should increase the available and total
@@ -138,8 +150,9 @@ fn handle_txn( account: &mut Account
             // If a client does not have sufficient available funds
             // the withdrawal should fail and the total amount of
             // funds should not change
-            (!account.locked && account.available >= amount).then(|| ())
-                .ok_or(Error::from(InvalidInput))?;
+            (!account.locked
+                && account.available >= amount
+                && amount.is_sign_positive()).then(|| ()).ok_or(Error::from(InvalidInput))?;
             // A withdraw is a debit to the client's asset account,
             // meaning it should decrease the available and total
             // funds of the client account
@@ -252,12 +265,15 @@ fn handle_txn( account: &mut Account
     }
 }
 
+/// Returns `true` if there are more disputes than resolves.
 fn is_under_dispute(txns: &Vec<&Transaction>) -> bool {
     let n_dispute = txns.iter().filter(|t| t.kind == Dispute).count();
     let n_resolve = txns.iter().filter(|t| t.kind == Resolve).count();
     n_dispute > n_resolve
 }
 
+/// Returns the first occurrence of a deposit or a
+/// withdrawal as `Some(&&Transaction)` if found.
 fn initial_txn<'a>(txns: &'a Vec<&'a Transaction>) -> Option<&'a &Transaction> {
     txns.iter().filter(|t| t.kind == Withdrawal || t.kind == Deposit).next()
 }
@@ -290,7 +306,66 @@ mod test {
     }
 
     #[test]
-    fn test_read_txns_map() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_read_txns() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,1.0001
+                        withdrawal,2,2,2.0
+                        dispute,3,3,
+                        resolve,4,4,
+                        chargeback,5,5,
+                        bad line
+                        chargeback,5,5
+                        deposit,1,1,1.0,1.0
+                        deposit,x,1,1.0
+                        deposit,1,x,1.0
+                        deposit,1,1,x")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let mut txns = read_txns(&std::path::PathBuf::from(path))?;
+
+        /*
+         * Then
+         */
+        txns.sort_by_key(|(i, _)| *i);
+        let mut iter = txns.into_iter();
+        assert_eq!(iter.next(), Some((0, Transaction{ kind:      Deposit
+            , client_id: 1
+            , tx_id:     1
+            , amount:    Some(dec!(1.0001))
+        })));
+        assert_eq!(iter.next(), Some((1, Transaction{ kind:      Withdrawal
+            , client_id: 2
+            , tx_id:     2
+            , amount:    Some(dec!(2.0))
+        })));
+        assert_eq!(iter.next(), Some((2, Transaction{ kind:      Dispute
+            , client_id: 3
+            , tx_id:     3
+            , amount:    None
+        })));
+        assert_eq!(iter.next(), Some((3, Transaction{ kind:      Resolve
+            , client_id: 4
+            , tx_id:     4
+            , amount:    None
+        })));
+        assert_eq!(iter.next(), Some((4, Transaction{ kind: Chargeback
+            , client_id: 5
+            , tx_id:     5
+            , amount:    None
+        })));
+        assert_eq!(iter.next(), None);
+        Ok(())
+    }
+
+    #[test]
+    fn test_txns_to_map() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -393,20 +468,18 @@ mod test {
     }
 
     #[test]
-    fn test_read_txns() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_deposit() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
         let mut file = NamedTempFile::new()?;
         writeln!(file, "type,client,tx,amount
                         deposit,1,1,1.0001
-                        withdrawal,2,2,2.0
-                        dispute,3,3,
-                        resolve,4,4,
-                        chargeback,5,5,
+                        deposit,1,2,+10000
+                        deposit,1,3,-500.0
+                        dépôt,1,4,2.0
                         bad line
-                        chargeback,5,5
-                        deposit,1,1,1.0,1.0
+                        deposit,1,5.0,4.04
                         deposit,x,1,1.0
                         deposit,1,x,1.0
                         deposit,1,1,x")?;
@@ -415,39 +488,20 @@ mod test {
         /*
          * When
          */
-        let mut txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
 
         /*
          * Then
          */
-        txns.sort_by_key(|(i, _)| *i);
-        let mut iter = txns.into_iter();
-        assert_eq!(iter.next(), Some((0, Transaction{ kind:      Deposit
-                                                    , client_id: 1
-                                                    , tx_id:     1
-                                                    , amount:    Some(dec!(1.0001))
-                                                    })));
-        assert_eq!(iter.next(), Some((1, Transaction{ kind:      Withdrawal
-                                                    , client_id: 2
-                                                    , tx_id:     2
-                                                    , amount:    Some(dec!(2.0))
-                                                    })));
-        assert_eq!(iter.next(), Some((2, Transaction{ kind:      Dispute
-                                                    , client_id: 3
-                                                    , tx_id:     3
-                                                    , amount:    None
-                                                    })));
-        assert_eq!(iter.next(), Some((3, Transaction{ kind:      Resolve
-                                                    , client_id: 4
-                                                    , tx_id:     4
-                                                    , amount:    None
-                                                    })));
-        assert_eq!(iter.next(), Some((4, Transaction{ kind: Chargeback
-                                                    , client_id: 5
-                                                    , tx_id:     5
-                                                    , amount:    None
-                                                    })));
-        assert_eq!(iter.next(), None);
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(10001.0001)
+                                          , held:      dec!(0.0)
+                                          , total:     dec!(10001.0001)
+                                          , locked:    false
+                                          }
+                                 ]);
         Ok(())
     }
 
