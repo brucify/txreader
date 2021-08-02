@@ -2,6 +2,8 @@ use crate::csv::TransactionKind::*;
 use csv::{ReaderBuilder, Trim, WriterBuilder};
 use log::debug;
 use rayon::prelude::*;
+use rust_decimal::prelude::*;
+use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Write, Error, ErrorKind::{InvalidInput}};
@@ -30,9 +32,9 @@ enum TransactionKind {
 #[derive(Debug, Serialize, PartialEq)]
 struct Account {
     client_id:  u16,
-    available:  f64,
-    held:       f64,
-    total:      f64,
+    available:  Decimal,
+    held:       Decimal,
+    total:      Decimal,
     locked:     bool,
 }
 
@@ -40,9 +42,9 @@ impl Account {
     fn new(client_id: u16) -> Account {
         Account {
             client_id,
-            available: 0.0,
-            held:      0.0,
-            total:     0.0,
+            available: dec!(0.0),
+            held:      dec!(0.0),
+            total:     dec!(0.0),
             locked:    false
         }
     }
@@ -123,6 +125,7 @@ fn handle_txn( account: &mut Account
              ) -> io::Result<()> {
     match txn {
         &Transaction{ kind: Deposit, amount: Some(amount), .. } => {
+            let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
             (!account.locked).then(|| ())
                 .ok_or(Error::from(InvalidInput))?;
             // A deposit is a credit to the client's asset account,
@@ -133,6 +136,7 @@ fn handle_txn( account: &mut Account
             Ok(())
         },
         &Transaction{ kind: Withdrawal, amount: Some(amount), .. } => {
+            let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
             // If a client does not have sufficient available funds
             // the withdrawal should fail and the total amount of
             // funds should not change
@@ -155,7 +159,8 @@ fn handle_txn( account: &mut Account
             let dispute = is_under_dispute(txns);
             let initial_txn = initial_txn(txns);
             match (dispute, initial_txn) {
-                (false, Some(&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
+                (false, Some(&&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
+                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // A dispute represents a client's claim that a
                     // transaction was erroneous and should be reversed.
                     // The transaction shouldn't be reversed yet but
@@ -168,7 +173,8 @@ fn handle_txn( account: &mut Account
                     account.held      += amount;
                     Ok(())
                 },
-                (false, Some(&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
+                (false, Some(&&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
+                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // NOTE: Assumes a dispute on a withdrawal temporarily
                     // puts funds into the client's held funds.
                     account.held      += amount;
@@ -188,7 +194,8 @@ fn handle_txn( account: &mut Account
             let dispute = is_under_dispute(txns);
             let initial_txn = initial_txn(txns);
             match (dispute, initial_txn) {
-                (true, Some(&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
+                (true, Some(&&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
+                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // A resolve represents a resolution to a dispute,
                     // releasing the associated held funds. Funds that
                     // were previously disputed are no longer disputed.
@@ -201,7 +208,8 @@ fn handle_txn( account: &mut Account
                     account.held      -= amount;
                     Ok(())
                 },
-                (true, Some(&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
+                (true, Some(&&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
+                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // NOTE: Assumes a resolve removes the temporarily
                     // increased funds from the client's held funds.
                     account.held      -= amount;
@@ -221,7 +229,8 @@ fn handle_txn( account: &mut Account
             let dispute = is_under_dispute(txns);
             let initial_txn = initial_txn(txns);
             match (dispute, initial_txn) {
-                (true, Some(&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
+                (true, Some(&&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
+                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // A chargeback is the final state of a dispute and
                     // represents the client reversing a transaction.
                     // Funds that were held have now been withdrawn.
@@ -234,7 +243,8 @@ fn handle_txn( account: &mut Account
                     account.locked  = true;
                     Ok(())
                 },
-                (true, Some(&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
+                (true, Some(&&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
+                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // NOTE: Assumes a chargeback to a withdrawal reverses
                     // a withdrawal, and puts the temporarily held funds
                     // back to the client available funds.
@@ -338,7 +348,7 @@ mod test {
          * Given
          */
         let txns =
-            hash_map!( 1 => vec![ (1,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(1.0) }) // +1
+            hash_map!( 1 => vec![ (1,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(1.00001) }) // +1
                                 , (3,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(2.0) }) // +2
                                 , (4,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(1.5) }) // -1.5
                                 , (5,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(10.0) }) // ignore
@@ -376,15 +386,15 @@ mod test {
          */
         accounts.sort_by_key(|a| a.client_id);
         assert_eq!(accounts, vec![ Account{ client_id: 1
-                                          , available: 3.0
-                                          , held:      0.0
-                                          , total:     3.0
+                                          , available: dec!(3.00001)
+                                          , held:      dec!(0.0)
+                                          , total:     dec!(3.00001)
                                           , locked:    true
                                           }
                                  , Account{ client_id: 2
-                                          , available: -11.5
-                                          , held:      5.0
-                                          , total:     -6.5
+                                          , available: dec!(-11.5)
+                                          , held:      dec!(5.0)
+                                          , total:     dec!(-6.5)
                                           , locked:    true
                                           }
                                  ]);
