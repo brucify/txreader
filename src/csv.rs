@@ -520,10 +520,11 @@ mod test {
                         withdrawal
                         1,2,1.0
                         withdrawal,1,4,2.0002
-                        withdrawal,1,5,3.00003
+                        withdrawal,1,5,3.00009
                         withdrawal,1,6.0,6.0
                         with drawal,1,7,7.0
                         with drawal,1,8,100000.0
+                        withdrawal,1,9,900000.0
                         withdrawal,x,1,1.0
                         withdrawal,1,x,1.0
                         withdrawal,1,1,x")?;
@@ -540,9 +541,72 @@ mod test {
          * Then
          */
         assert_eq!(accounts, vec![ Account{ client_id: 1
-                                          , available: dec!(9993.9998)
+                                          , available: dec!(9993.9997)
                                           , held:      dec!(0.0)
-                                          , total:     dec!(9993.9998)
+                                          , total:     dec!(9993.9997)
+                                          , locked:    false
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dispute() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,10000.0
+                        deposit,1,2,2000.0002
+                        deposit,1,3,300.00003
+                        deposit,1,8,8
+                        withdrawal,1,4,4
+                        withdrawal,1,5,5.0005
+                        withdrawal,1,6,6.0006
+                        withdrawal,1,7,7.00007
+                        withdrawal,1,999,70000.0
+                        dispute,1,1,
+                        dispute,1,2,
+                        dispute,1,3,
+                        dispute,1,4,
+                        dispute,1,5,
+                        dispute,1,6,
+                        dispute,1,6,
+                        dispute,1,6,
+                        dispute,1,7
+                        dispute,1,100,
+                        dispute,1,999,
+                        dispute,1,999,
+                        dispute,1,1000
+                        dispute,1,1000,10000.0
+                        dispute,2,1,
+                        dispute,x,1,1.0
+                        dispute,1,x,1.0
+                        dispute,1,1,x")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let mut accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        accounts.sort_by_key(|a| a.client_id);
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(-14.0012)
+                                          , held:      dec!(12315.0013)
+                                          , total:     dec!(12301.0001)
+                                          , locked:    false
+                                          }
+                                 , Account{ client_id: 2
+                                          , available: dec!(0)
+                                          , held:      dec!(0)
+                                          , total:     dec!(0)
                                           , locked:    false
                                           }
                                  ]);
