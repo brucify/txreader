@@ -16,7 +16,7 @@ struct Transaction {
     client_id:  u16,
     #[serde(rename = "tx")]
     tx_id:      u32,
-    amount:     Option<f64>,
+    amount:     Option<Decimal>,
 }
 
 #[derive(Debug, Deserialize, PartialEq)]
@@ -125,7 +125,6 @@ fn handle_txn( account: &mut Account
              ) -> io::Result<()> {
     match txn {
         &Transaction{ kind: Deposit, amount: Some(amount), .. } => {
-            let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
             (!account.locked).then(|| ())
                 .ok_or(Error::from(InvalidInput))?;
             // A deposit is a credit to the client's asset account,
@@ -136,7 +135,6 @@ fn handle_txn( account: &mut Account
             Ok(())
         },
         &Transaction{ kind: Withdrawal, amount: Some(amount), .. } => {
-            let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
             // If a client does not have sufficient available funds
             // the withdrawal should fail and the total amount of
             // funds should not change
@@ -160,7 +158,6 @@ fn handle_txn( account: &mut Account
             let initial_txn = initial_txn(txns);
             match (dispute, initial_txn) {
                 (false, Some(&&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
-                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // A dispute represents a client's claim that a
                     // transaction was erroneous and should be reversed.
                     // The transaction shouldn't be reversed yet but
@@ -174,7 +171,6 @@ fn handle_txn( account: &mut Account
                     Ok(())
                 },
                 (false, Some(&&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
-                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // NOTE: Assumes a dispute on a withdrawal temporarily
                     // puts funds into the client's held funds.
                     account.held      += amount;
@@ -195,7 +191,6 @@ fn handle_txn( account: &mut Account
             let initial_txn = initial_txn(txns);
             match (dispute, initial_txn) {
                 (true, Some(&&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
-                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // A resolve represents a resolution to a dispute,
                     // releasing the associated held funds. Funds that
                     // were previously disputed are no longer disputed.
@@ -209,7 +204,6 @@ fn handle_txn( account: &mut Account
                     Ok(())
                 },
                 (true, Some(&&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
-                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // NOTE: Assumes a resolve removes the temporarily
                     // increased funds from the client's held funds.
                     account.held      -= amount;
@@ -230,7 +224,6 @@ fn handle_txn( account: &mut Account
             let initial_txn = initial_txn(txns);
             match (dispute, initial_txn) {
                 (true, Some(&&Transaction{ kind: Deposit, amount: Some(amount), .. })) => {
-                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // A chargeback is the final state of a dispute and
                     // represents the client reversing a transaction.
                     // Funds that were held have now been withdrawn.
@@ -244,7 +237,6 @@ fn handle_txn( account: &mut Account
                     Ok(())
                 },
                 (true, Some(&&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
-                    let amount = Decimal::from_f64(amount).ok_or(Error::from(InvalidInput))?;
                     // NOTE: Assumes a chargeback to a withdrawal reverses
                     // a withdrawal, and puts the temporarily held funds
                     // back to the client available funds.
@@ -326,12 +318,12 @@ mod test {
          * Then
          */
         txns_map.iter_mut().for_each(|(_k, v)| v.sort_by_key(|(i, _)| *i) );
-        assert_eq!(txns_map.get(&1), Some(&vec![ (0, Transaction{ kind: Deposit, client_id: 1, tx_id: 1, amount: Some(1.0) })
-                                                , (2, Transaction{ kind: Deposit, client_id: 1, tx_id: 3, amount: Some(2.0) })
-                                                , (3, Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4, amount: Some(1.5) })
+        assert_eq!(txns_map.get(&1), Some(&vec![ (0, Transaction{ kind: Deposit, client_id: 1, tx_id: 1, amount: Some(dec!(1.0)) })
+                                                , (2, Transaction{ kind: Deposit, client_id: 1, tx_id: 3, amount: Some(dec!(2.0)) })
+                                                , (3, Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4, amount: Some(dec!(1.5)) })
                                                 ]));
-        assert_eq!(txns_map.get(&2), Some(&vec![ (1, Transaction{ kind: Deposit, client_id: 2, tx_id: 2, amount: Some(2.0) })
-                                                , (4, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 5, amount: Some(3.0) })
+        assert_eq!(txns_map.get(&2), Some(&vec![ (1, Transaction{ kind: Deposit, client_id: 2, tx_id: 2, amount: Some(dec!(2.0)) })
+                                                , (4, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 5, amount: Some(dec!(3.0)) })
                                                 ]));
         assert_eq!(txns_map.get(&3), None);
         assert_eq!(txns_map.get(&4), Some(&vec![ (5, Transaction{ kind: Dispute, client_id: 4, tx_id: 4, amount: None })
@@ -348,10 +340,10 @@ mod test {
          * Given
          */
         let txns =
-            hash_map!( 1 => vec![ (1,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(1.00001) }) // +1
-                                , (3,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(2.0) }) // +2
-                                , (4,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(1.5) }) // -1.5
-                                , (5,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(10.0) }) // ignore
+            hash_map!( 1 => vec![ (1,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(dec!(1.00001)) }) // +1
+                                , (3,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(dec!(2.0)) }) // +2
+                                , (4,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(1.5)) }) // -1.5
+                                , (5,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(10.0)) }) // ignore
                                 , (6,  Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None }) // ignore
                                 , (6,  Transaction{ kind: Chargeback, client_id: 1, tx_id: 3,   amount: None }) // ignore
                                 , (7,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None }) // hold 2
@@ -360,12 +352,12 @@ mod test {
                                 , (10, Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None }) // release 2
                                 , (11, Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None }) // hold 1.5
                                 , (12, Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None }) // revert 1.5, freeze
-                                , (13, Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(2.0) }) // ignore
+                                , (13, Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(dec!(2.0)) }) // ignore
                                 ]
-                     , 2 => vec![ (14, Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(5.0) }) // +5
-                                , (15, Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(10.0) }) // +10
-                                , (16, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(1.5) }) // -1.5
-                                , (17, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(10.0) }) // -10
+                     , 2 => vec![ (14, Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(dec!(5.0)) }) // +5
+                                , (15, Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(dec!(10.0)) }) // +10
+                                , (16, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(dec!(1.5)) }) // -1.5
+                                , (17, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(dec!(10.0)) }) // -10
                                 , (18, Transaction{ kind: Resolve,    client_id: 2, tx_id: 103, amount: None }) // ignore
                                 , (19, Transaction{ kind: Chargeback, client_id: 2, tx_id: 103, amount: None }) // ignore
                                 , (20, Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None }) // hold 10
@@ -374,7 +366,7 @@ mod test {
                                 , (23, Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None }) // release 5
                                 , (24, Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None }) // hold 5
                                 , (25, Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None }) // revert 10, freeze
-                                , (26, Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(20.0) }) // ignore
+                                , (26, Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(dec!(20.0)) }) // ignore
                                 ]);
         /*
          * When
@@ -433,12 +425,12 @@ mod test {
         assert_eq!(iter.next(), Some((0, Transaction{ kind:      Deposit
                                                     , client_id: 1
                                                     , tx_id:     1
-                                                    , amount:    Some(1.0001)
+                                                    , amount:    Some(dec!(1.0001))
                                                     })));
         assert_eq!(iter.next(), Some((1, Transaction{ kind:      Withdrawal
                                                     , client_id: 2
                                                     , tx_id:     2
-                                                    , amount:    Some(2.0)
+                                                    , amount:    Some(dec!(2.0))
                                                     })));
         assert_eq!(iter.next(), Some((2, Transaction{ kind:      Dispute
                                                     , client_id: 3
