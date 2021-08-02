@@ -130,7 +130,8 @@ fn to_account(client_id: u16, client_txns: Vec<(usize, Transaction)>) -> Account
 }
 
 /// Handles a `Transaction` and updates the client's
-/// `Account`
+/// `Account`. The `amount` is rounded to four digits
+/// after decimal.
 fn handle_txn( account: &mut Account
              , handled: &HashMap<u32, Vec<&Transaction>>
              , txn:     &Transaction
@@ -142,8 +143,8 @@ fn handle_txn( account: &mut Account
             // A deposit is a credit to the client's asset account,
             // meaning it should increase the available and total
             // funds of the client account
-            account.available += amount;
-            account.total     += amount;
+            account.available += amount.round_dp(4);
+            account.total     += amount.round_dp(4);
             Ok(())
         },
         &Transaction{ kind: Withdrawal, amount: Some(amount), .. } => {
@@ -156,8 +157,8 @@ fn handle_txn( account: &mut Account
             // A withdraw is a debit to the client's asset account,
             // meaning it should decrease the available and total
             // funds of the client account
-            account.available -= amount;
-            account.total     -= amount;
+            account.available -= amount.round_dp(4);
+            account.total     -= amount.round_dp(4);
             Ok(())
         },
         &Transaction{ kind: Dispute, tx_id, .. } => {
@@ -179,15 +180,15 @@ fn handle_txn( account: &mut Account
                     // by the amount disputed, their held funds should
                     // increase by the amount disputed, while their
                     // total funds should remain the same.
-                    account.available -= amount;
-                    account.held      += amount;
+                    account.available -= amount.round_dp(4);
+                    account.held      += amount.round_dp(4);
                     Ok(())
                 },
                 (false, Some(&&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
                     // NOTE: Assumes a dispute on a withdrawal temporarily
                     // puts funds into the client's held funds.
-                    account.held      += amount;
-                    account.total     += amount;
+                    account.held      += amount.round_dp(4);
+                    account.total     += amount.round_dp(4);
                     Ok(())
                 },
                 _ => Err(Error::from(InvalidInput))
@@ -212,15 +213,15 @@ fn handle_txn( account: &mut Account
                     // available funds should increase by the amount no
                     // longer disputed, and their total funds should
                     // remain the same.
-                    account.available += amount;
-                    account.held      -= amount;
+                    account.available += amount.round_dp(4);
+                    account.held      -= amount.round_dp(4);
                     Ok(())
                 },
                 (true, Some(&&Transaction{ kind: Withdrawal, amount: Some(amount), .. })) => {
                     // NOTE: Assumes a resolve removes the temporarily
                     // increased funds from the client's held funds.
-                    account.held      -= amount;
-                    account.total     -= amount;
+                    account.held      -= amount.round_dp(4);
+                    account.total     -= amount.round_dp(4);
                     Ok(())
                 },
                 _ => Err(Error::from(InvalidInput))
@@ -244,8 +245,8 @@ fn handle_txn( account: &mut Account
                     // funds should decrease by the amount previously
                     // disputed. If a chargeback occurs the client's
                     // account should be immediately frozen.
-                    account.held   -= amount;
-                    account.total  -= amount;
+                    account.held   -= amount.round_dp(4);
+                    account.total  -= amount.round_dp(4);
                     account.locked  = true;
                     Ok(())
                 },
@@ -253,8 +254,8 @@ fn handle_txn( account: &mut Account
                     // NOTE: Assumes a chargeback to a withdrawal reverses
                     // a withdrawal, and puts the temporarily held funds
                     // back to the client available funds.
-                    account.available += amount;
-                    account.held      -= amount;
+                    account.available += amount.round_dp(4);
+                    account.held      -= amount.round_dp(4);
                     account.locked     = true;
                     Ok(())
                 },
@@ -312,8 +313,8 @@ mod test {
          */
         let mut file = NamedTempFile::new()?;
         writeln!(file, "type,client,tx,amount
-                        deposit,1,1,1.0001
-                        withdrawal,2,2,2.0
+                        deposit,1,1,1.001
+                        withdrawal,2,2,2.0002
                         dispute,3,3,
                         resolve,4,4,
                         chargeback,5,5,
@@ -336,30 +337,30 @@ mod test {
         txns.sort_by_key(|(i, _)| *i);
         let mut iter = txns.into_iter();
         assert_eq!(iter.next(), Some((0, Transaction{ kind:      Deposit
-            , client_id: 1
-            , tx_id:     1
-            , amount:    Some(dec!(1.0001))
-        })));
+                                                    , client_id: 1
+                                                    , tx_id:     1
+                                                    , amount:    Some(dec!(1.001))
+                                                    })));
         assert_eq!(iter.next(), Some((1, Transaction{ kind:      Withdrawal
-            , client_id: 2
-            , tx_id:     2
-            , amount:    Some(dec!(2.0))
-        })));
+                                                    , client_id: 2
+                                                    , tx_id:     2
+                                                    , amount:    Some(dec!(2.0002))
+                                                    })));
         assert_eq!(iter.next(), Some((2, Transaction{ kind:      Dispute
-            , client_id: 3
-            , tx_id:     3
-            , amount:    None
-        })));
+                                                    , client_id: 3
+                                                    , tx_id:     3
+                                                    , amount:    None
+                                                    })));
         assert_eq!(iter.next(), Some((3, Transaction{ kind:      Resolve
-            , client_id: 4
-            , tx_id:     4
-            , amount:    None
-        })));
+                                                    , client_id: 4
+                                                    , tx_id:     4
+                                                    , amount:    None
+                                                    })));
         assert_eq!(iter.next(), Some((4, Transaction{ kind: Chargeback
-            , client_id: 5
-            , tx_id:     5
-            , amount:    None
-        })));
+                                                    , client_id: 5
+                                                    , tx_id:     5
+                                                    , amount:    None
+                                                    })));
         assert_eq!(iter.next(), None);
         Ok(())
     }
@@ -415,32 +416,32 @@ mod test {
          * Given
          */
         let txns =
-            hash_map!( 1 => vec![ (1,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(dec!(1.00001)) }) // +1
-                                , (3,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(dec!(2.0)) }) // +2
-                                , (4,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(1.5)) }) // -1.5
+            hash_map!( 1 => vec![ (1,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(dec!(1.0001)) }) // +1.0001
+                                , (3,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(dec!(2.00002)) }) // +2.0
+                                , (4,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(1.5001)) }) // -1.5001
                                 , (5,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(10.0)) }) // ignore
                                 , (6,  Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None }) // ignore
                                 , (6,  Transaction{ kind: Chargeback, client_id: 1, tx_id: 3,   amount: None }) // ignore
-                                , (7,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None }) // hold 2
+                                , (7,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None }) // hold 2.0
                                 , (8,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None }) // ignore
                                 , (9,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 100, amount: None }) // ignore
-                                , (10, Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None }) // release 2
-                                , (11, Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None }) // hold 1.5
-                                , (12, Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None }) // revert 1.5, freeze
+                                , (10, Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None }) // release 2.0
+                                , (11, Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None }) // hold 1.5001
+                                , (12, Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None }) // revert 1.5001, freeze
                                 , (13, Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(dec!(2.0)) }) // ignore
                                 ]
-                     , 2 => vec![ (14, Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(dec!(5.0)) }) // +5
-                                , (15, Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(dec!(10.0)) }) // +10
+                     , 2 => vec![ (14, Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(dec!(5.0)) }) // +5.0
+                                , (15, Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(dec!(10.0)) }) // +10.0
                                 , (16, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(dec!(1.5)) }) // -1.5
-                                , (17, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(dec!(10.0)) }) // -10
+                                , (17, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(dec!(10.0)) }) // -10.0
                                 , (18, Transaction{ kind: Resolve,    client_id: 2, tx_id: 103, amount: None }) // ignore
                                 , (19, Transaction{ kind: Chargeback, client_id: 2, tx_id: 103, amount: None }) // ignore
-                                , (20, Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None }) // hold 10
-                                , (21, Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None }) // hold 5
+                                , (20, Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None }) // hold 10.0
+                                , (21, Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None }) // hold 5.0
                                 , (22, Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None }) // ignore
-                                , (23, Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None }) // release 5
-                                , (24, Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None }) // hold 5
-                                , (25, Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None }) // revert 10, freeze
+                                , (23, Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None }) // release 5.0
+                                , (24, Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None }) // hold 5.0
+                                , (25, Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None }) // revert 10.0, freeze
                                 , (26, Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(dec!(20.0)) }) // ignore
                                 ]);
         /*
@@ -453,9 +454,9 @@ mod test {
          */
         accounts.sort_by_key(|a| a.client_id);
         assert_eq!(accounts, vec![ Account{ client_id: 1
-                                          , available: dec!(3.00001)
+                                          , available: dec!(3.0001)
                                           , held:      dec!(0.0)
-                                          , total:     dec!(3.00001)
+                                          , total:     dec!(3.0001)
                                           , locked:    true
                                           }
                                  , Account{ client_id: 2
@@ -480,6 +481,7 @@ mod test {
                         dépôt,1,4,2.0
                         bad line
                         deposit,1,5.0,4.04
+                        deposit,1,6,0.00004
                         deposit,x,1,1.0
                         deposit,1,x,1.0
                         deposit,1,1,x")?;
@@ -499,6 +501,48 @@ mod test {
                                           , available: dec!(10001.0001)
                                           , held:      dec!(0.0)
                                           , total:     dec!(10001.0001)
+                                          , locked:    false
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,+10000
+                        withdrawal,1,2,1
+                        withdrawal,1,3,-1
+                        withdrawal
+                        1,2,1.0
+                        withdrawal,1,4,2.0002
+                        withdrawal,1,5,3.00003
+                        withdrawal,1,6.0,6.0
+                        with drawal,1,7,7.0
+                        with drawal,1,8,100000.0
+                        withdrawal,x,1,1.0
+                        withdrawal,1,x,1.0
+                        withdrawal,1,1,x")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(9993.9998)
+                                          , held:      dec!(0.0)
+                                          , total:     dec!(9993.9998)
                                           , locked:    false
                                           }
                                  ]);
