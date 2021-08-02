@@ -266,11 +266,14 @@ fn handle_txn( account: &mut Account
     }
 }
 
-/// Returns `true` if there are more disputes than resolves.
+/// Returns `true` if there are more disputes than resolves,
+/// and if there has been no chargebacks.
 fn is_under_dispute(txns: &Vec<&Transaction>) -> bool {
     let n_dispute = txns.iter().filter(|t| t.kind == Dispute).count();
     let n_resolve = txns.iter().filter(|t| t.kind == Resolve).count();
-    n_dispute > n_resolve
+    let chargeback = txns.iter().any(|t| t.kind == Chargeback);
+    let dispute = n_dispute > n_resolve;
+    dispute && !chargeback
 }
 
 /// Returns the first occurrence of a deposit or a
@@ -602,6 +605,76 @@ mod test {
                                           , held:      dec!(12315.0013)
                                           , total:     dec!(12301.0001)
                                           , locked:    false
+                                          }
+                                 , Account{ client_id: 2
+                                          , available: dec!(0)
+                                          , held:      dec!(0)
+                                          , total:     dec!(0)
+                                          , locked:    false
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_chargeback() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,10000.0
+                        deposit,1,2,2000.0002
+                        deposit,1,3,300.00003
+                        deposit,1,8,8
+                        withdrawal,1,4,4
+                        withdrawal,1,5,5.0005
+                        withdrawal,1,6,6.0006
+                        withdrawal,1,7,7.00007
+                        withdrawal,1,998,70000.0
+                        deposit,1,999,998.998
+                        dispute,1,1,
+                        dispute,1,2,
+                        dispute,1,3,
+                        dispute,1,4,
+                        dispute,1,5,
+                        dispute,1,6,
+                        chargeback,1,1,
+                        chargeback,1,2,
+                        chargeback,1,3,
+                        chargeback,1,4,
+                        chargeback,1,5,
+                        chargeback,1,6,
+                        chargeback,1,6,
+                        chargeback,1,6,
+                        chargeback,1,6,
+                        chargeback,1,998,
+                        chargeback,1,999,
+                        chargeback,1,1000,
+                        chargeback,1,1000,10000.0
+                        chargeback,2,1,
+                        chargeback,x,1,1.0
+                        chargeback,1,x,1.0
+                        chargeback,1,1,x
+                        ")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let mut accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        accounts.sort_by_key(|a| a.client_id);
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(999.9979)
+                                          , held:      dec!(0)
+                                          , total:     dec!(999.9979)
+                                          , locked:    true
                                           }
                                  , Account{ client_id: 2
                                           , available: dec!(0)
