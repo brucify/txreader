@@ -53,7 +53,6 @@ impl Account {
 pub fn parse_file(path: &std::path::PathBuf) -> io::Result<()> {
     let txns = read_txns(path)?;
     let txns_map = txns_to_map(txns);
-    debug!("Transactions by client: {:?}", txns_map);
     let accounts = txns_map_to_accounts(txns_map);
     print_accounts(&accounts)?;
     Ok(())
@@ -121,7 +120,7 @@ fn to_account(client_id: u16, client_txns: Vec<(usize, Transaction)>) -> Account
             | {
                 match handle_txn(&mut account, &handled, txn) {
                     Ok(()) => handled.entry(txn.tx_id).or_insert(vec![]).push(&txn), // only insert when txn ok
-                    _ => debug!("Invalid transaction: {:?}", txn)
+                    _ => debug!("Ignoring invalid transaction: {:?}", txn)
                 };
                 (account, handled)
             }
