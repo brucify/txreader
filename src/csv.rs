@@ -767,4 +767,312 @@ mod test {
         Ok(())
     }
 
+    #[test]
+    fn test_withdraw_too_much() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        withdrawal,1,1,50
+                        deposit,1,2,300
+                        dispute,1,2,
+                        deposit,1,3,100
+                        withdrawal,1,4,200")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(100)
+                                          , held:      dec!(300)
+                                          , total:     dec!(400)
+                                          , locked:    false
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dispute_deposit() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,100
+                        dispute,1,1,
+                        resolve,1,1,
+                        dispute,1,1,
+                        dispute,1,1,
+                        dispute,1,2,")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(0)
+                                          , held:      dec!(100)
+                                          , total:     dec!(100)
+                                          , locked:    false
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_dispute_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,100
+                        withdrawal,1,2,50
+                        dispute,1,2,
+                        resolve,1,2,
+                        dispute,1,2,
+                        dispute,1,2,
+                        dispute,1,2,")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(50)
+                                          , held:      dec!(50)
+                                          , total:     dec!(100)
+                                          , locked:    false
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolve_many_times() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,100
+                        dispute,1,1,
+                        resolve,1,1,
+                        resolve,1,1,
+                        resolve,1,2,")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(100)
+                                          , held:      dec!(0)
+                                          , total:     dec!(100)
+                                          , locked:    false
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_chargeback_deposit() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,100
+                        dispute,1,1,
+                        chargeback,1,1,
+                        chargeback,1,1,
+                        chargeback,1,2,
+                        resolve,1,1,")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(0)
+                                          , held:      dec!(0)
+                                          , total:     dec!(0)
+                                          , locked:    true
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_chargeback_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,100
+                        withdrawal,1,2,50
+                        dispute,1,2,
+                        chargeback,1,2,
+                        chargeback,1,2,
+                        chargeback,1,3,
+                        resolve,1,2,")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(100)
+                                          , held:      dec!(0)
+                                          , total:     dec!(100)
+                                          , locked:    true
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_withdraw_from_locked_account() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,100
+                        dispute,1,1,
+                        chargeback,1,1,
+                        withdrawal,1,2,50")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(0)
+                                          , held:      dec!(0)
+                                          , total:     dec!(0)
+                                          , locked:    true
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_deposit_to_locked_account() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,100
+                        dispute,1,1,
+                        chargeback,1,1,
+                        deposit,1,2,50")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(0)
+                                          , held:      dec!(0)
+                                          , total:     dec!(0)
+                                          , locked:    true
+                                          }
+                                 ]);
+        Ok(())
+    }
+
+    #[test]
+    fn test_resolve_locked_account() -> Result<(), Box<dyn std::error::Error>> {
+        /*
+         * Given
+         */
+        let mut file = NamedTempFile::new()?;
+        writeln!(file, "type,client,tx,amount
+                        deposit,1,1,100
+                        dispute,1,1,
+                        chargeback,1,1,
+                        resolve,1,1,")?;
+        let path = file.path().to_str().unwrap();
+
+        /*
+         * When
+         */
+        let txns = read_txns(&std::path::PathBuf::from(path))?;
+        let txns_map = txns_to_map(txns);
+        let accounts = txns_map_to_accounts(txns_map);
+
+        /*
+         * Then
+         */
+        assert_eq!(accounts, vec![ Account{ client_id: 1
+                                          , available: dec!(0)
+                                          , held:      dec!(0)
+                                          , total:     dec!(0)
+                                          , locked:    true
+                                          }
+                                 ]);
+        Ok(())
+    }
 }
