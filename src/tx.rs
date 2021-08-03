@@ -1,4 +1,5 @@
-use crate::csv::TransactionKind::*;
+use crate::tx::TransactionKind::*;
+use anyhow::Context;
 use csv::{ReaderBuilder, Trim, WriterBuilder};
 use log::debug;
 use rayon::prelude::*;
@@ -50,11 +51,13 @@ impl Account {
     }
 }
 
-pub fn parse_file(path: &std::path::PathBuf) -> io::Result<()> {
-    let txns = read_txns(path)?;
+pub async fn from_path(path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
+    let txns = read_txns(path)
+        .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
     let txns_map = txns_to_map(txns);
     let accounts = txns_map_to_accounts(txns_map);
-    print_accounts(&accounts)?;
+    print_accounts(&accounts)
+        .with_context(|| format!("Error when printing accounts from file `{:?}`", path))?;
     Ok(())
 }
 
@@ -303,12 +306,15 @@ fn maybe_print_account(buf: &mut BufWriter<StdoutLock>, account: &Account) -> Re
 #[cfg(test)]
 mod test {
     use common_macros::hash_map;
-    use crate::csv::*;
+    use crate::tx::*;
+    use futures::executor::block_on;
     use tempfile::NamedTempFile;
 
     #[test]
-    fn test_parse_file() -> io::Result<()> {
-        assert_eq!(parse_file(&std::path::PathBuf::from("transactions.csv"))?, ());
+    fn test_parse_file() -> Result<(), anyhow::Error> {
+        let path = &std::path::PathBuf::from("transactions.csv");
+        let fut = from_path(path);
+        assert_eq!(block_on(fut)?, ());
         Ok(())
     }
 

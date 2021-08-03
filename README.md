@@ -23,4 +23,4 @@ Unit tests
 
     $ cargo test
 
-The unit tests are included in the `mod test` module in `csv.rs`. 
+The unit tests are included in the `mod test` module in `tx.rs`. 
