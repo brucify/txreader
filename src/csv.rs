@@ -6,7 +6,7 @@ use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, Write, Error, ErrorKind::{InvalidInput}};
+use std::io::{self, BufWriter, Error, ErrorKind::{InvalidInput}, Stdout, Write};
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct Transaction {
@@ -283,18 +283,19 @@ fn initial_txn<'a>(txns: &'a Vec<&'a Transaction>) -> Option<&'a &Transaction> {
 }
 
 fn print_accounts(accounts: &Vec<Account>) -> io::Result<()>{
-    writeln!(io::stdout().lock(), "client_id,available,held,total,locked")?;
-    accounts.par_iter().for_each(|account| maybe_print_account(account).unwrap() );
+    let mut buf = BufWriter::new(io::stdout());
+    writeln!(buf, "client_id,available,held,total,locked")?;
+    accounts.iter().for_each(|account| maybe_print_account(&mut buf, account).unwrap() );
     Ok(())
 }
 
-fn maybe_print_account(account: &Account) -> Result<(), Box<dyn std::error::Error>> {
+fn maybe_print_account(buf: &mut BufWriter<Stdout>, account: &Account) -> Result<(), Box<dyn std::error::Error>> {
     let mut wtr = WriterBuilder::new()
         .has_headers(false)
         .from_writer(vec![]);
     wtr.serialize(account)?;
     let data = String::from_utf8(wtr.into_inner()?)?;
-    write!(io::stdout().lock(), "{}", data)?;
+    write!(buf, "{}", data)?;
     Ok(())
 }
 
