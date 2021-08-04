@@ -7,7 +7,7 @@ use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, BufWriter, Error, ErrorKind::{InvalidInput}, StdoutLock, Write};
+use std::io::{self, BufWriter, Error, ErrorKind::{InvalidInput}};
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct Transaction {
@@ -52,11 +52,18 @@ impl Account {
 }
 
 pub async fn from_path(path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
+    let stdout = io::stdout();
+    let lock = stdout.lock();
+    let mut buf = BufWriter::new(lock);
+    from_path_with(&mut buf, path)
+}
+
+fn from_path_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
     let txns = read_txns(path)
         .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
     let txns_map = txns_to_map(txns);
     let accounts = txns_map_to_accounts(txns_map);
-    print_accounts(&accounts)
+    print_accounts_with(writer, &accounts)
         .with_context(|| format!("Error when printing accounts from file `{:?}`", path))?;
     Ok(())
 }
@@ -284,22 +291,19 @@ fn initial_txn<'a>(txns: &'a Vec<&'a Transaction>) -> Option<&'a &Transaction> {
     txns.iter().filter(|t| t.kind == Withdrawal || t.kind == Deposit).next()
 }
 
-fn print_accounts(accounts: &Vec<Account>) -> io::Result<()> {
-    let stdout = io::stdout();
-    let lock = stdout.lock();
-    let mut buf = BufWriter::new(lock);
-    writeln!(buf, "client_id,available,held,total,locked")?;
-    accounts.iter().for_each(|account| maybe_print_account(&mut buf, account).unwrap() );
+fn print_accounts_with(writer: &mut impl io::Write, accounts: &Vec<Account>) -> io::Result<()> {
+    writeln!(writer, "client_id,available,held,total,locked")?;
+    accounts.iter().for_each(|account| print_account_with(writer, account).unwrap() );
     Ok(())
 }
 
-fn maybe_print_account(buf: &mut BufWriter<StdoutLock>, account: &Account) -> Result<(), Box<dyn std::error::Error>> {
+fn print_account_with(writer: &mut impl io::Write, account: &Account) -> Result<(), Box<dyn std::error::Error>> {
     let mut wtr = WriterBuilder::new()
         .has_headers(false)
         .from_writer(vec![]);
     wtr.serialize(account)?;
     let data = String::from_utf8(wtr.into_inner()?)?;
-    write!(buf, "{}", data)?;
+    write!(writer, "{}", data)?;
     Ok(())
 }
 
@@ -307,14 +311,14 @@ fn maybe_print_account(buf: &mut BufWriter<StdoutLock>, account: &Account) -> Re
 mod test {
     use common_macros::hash_map;
     use crate::tx::*;
-    use futures::executor::block_on;
     use tempfile::NamedTempFile;
+    use std::io::Write;
 
     #[test]
     fn test_parse_file() -> Result<(), anyhow::Error> {
         let path = &std::path::PathBuf::from("transactions.csv");
-        let fut = from_path(path);
-        assert_eq!(block_on(fut)?, ());
+        let mut result = Vec::new();
+        assert_eq!(from_path_with(&mut result, path)?, ());
         Ok(())
     }
 
