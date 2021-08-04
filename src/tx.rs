@@ -7,7 +7,7 @@ use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, BufWriter, Error, ErrorKind::{InvalidInput}};
+use std::io::{self, Error, ErrorKind::{InvalidInput}};
 
 #[derive(Debug, Deserialize, PartialEq)]
 struct Transaction {
@@ -51,20 +51,22 @@ impl Account {
     }
 }
 
+/// Reads the transactions from a file and writes the serialized results to
+/// `std::io::stdout()`.
 pub async fn from_path(path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
     let stdout = io::stdout();
-    let lock = stdout.lock();
-    let mut buf = BufWriter::new(lock);
-    from_path_with(&mut buf, path)
+    let mut lock = stdout.lock();
+    from_path_with(&mut lock, path)
 }
 
+/// Reads the transactions from a file and writes the serialized results to
+/// a given `std::io::Write` writer.
 fn from_path_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
     let txns = read_txns(path)
         .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
     let txns_map = txns_to_map(txns);
     let accounts = txns_map_to_accounts(txns_map);
-    print_accounts_with(writer, &accounts)
-        .with_context(|| format!("Error when printing accounts from file `{:?}`", path))?;
+    print_accounts_with(writer, &accounts);
     Ok(())
 }
 
@@ -291,20 +293,14 @@ fn initial_txn<'a>(txns: &'a Vec<&'a Transaction>) -> Option<&'a &Transaction> {
     txns.iter().filter(|t| t.kind == Withdrawal || t.kind == Deposit).next()
 }
 
-fn print_accounts_with(writer: &mut impl io::Write, accounts: &Vec<Account>) -> io::Result<()> {
-    writeln!(writer, "client_id,available,held,total,locked")?;
-    accounts.iter().for_each(|account| print_account_with(writer, account).unwrap() );
-    Ok(())
-}
-
-fn print_account_with(writer: &mut impl io::Write, account: &Account) -> Result<(), Box<dyn std::error::Error>> {
+/// Wraps the `writer` in a `csv::Writer` and writes the accounts.
+/// The `csv::Writer` is already buffered so there is no need to wrap
+/// `writer` in a `io::BufWriter`.
+fn print_accounts_with(writer: &mut impl io::Write, accounts: &Vec<Account>) {
     let mut wtr = WriterBuilder::new()
-        .has_headers(false)
-        .from_writer(vec![]);
-    wtr.serialize(account)?;
-    let data = String::from_utf8(wtr.into_inner()?)?;
-    write!(writer, "{}", data)?;
-    Ok(())
+        .has_headers(true)
+        .from_writer(writer);
+    accounts.iter().for_each(|account| wtr.serialize(account).unwrap());
 }
 
 #[cfg(test)]
