@@ -11,7 +11,7 @@ fn run() {
     env_logger::init();
     let args = cli::args();
     info!("Reading from path {:?}", args.path);
-    let fut = tx::from_path(&args.path);
+    let fut = tx::read(&args.path);
     match block_on(fut) {
         Ok(_) => info!("Done."),
         Err(error) => error!("Error: {:?}", error)

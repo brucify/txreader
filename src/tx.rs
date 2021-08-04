@@ -53,15 +53,15 @@ impl Account {
 
 /// Reads the transactions from a file and writes the serialized results to
 /// `std::io::stdout()`.
-pub async fn from_path(path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
+pub async fn read(path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
     let stdout = io::stdout();
     let mut lock = stdout.lock();
-    from_path_with(&mut lock, path)
+    read_with(&mut lock, path)
 }
 
 /// Reads the transactions from a file and writes the serialized results to
 /// a given `std::io::Write` writer.
-fn from_path_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
+fn read_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
     let txns = read_txns(path)
         .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
     let txns_map = txns_to_map(txns);
@@ -311,10 +311,18 @@ mod test {
     use std::io::Write;
 
     #[test]
-    fn test_parse_file() -> Result<(), anyhow::Error> {
+    fn test_read_with() -> Result<(), anyhow::Error> {
         let path = &std::path::PathBuf::from("transactions.csv");
         let mut result = Vec::new();
-        assert_eq!(from_path_with(&mut result, path)?, ());
+        read_with(&mut result, path)?;
+        let mut lines = std::str::from_utf8(&result)?.lines();
+        let expected = vec![ "client_id,available,held,total,locked"
+                           , "1,1.4996,0.0,1.4996,false"
+                           , "2,2,0.0,2,false"
+                           , "4,0.0,0.0,0.0,false"
+                           , "5,0.0,0.0,0.0,false"
+                           ];
+        assert_eq!(true, lines.all(|l| expected.contains(&l)));
         Ok(())
     }
 
