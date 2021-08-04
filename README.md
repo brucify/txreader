@@ -34,6 +34,8 @@ block_on(fut).unwrap();
 ```
 This will write the results to `std::io::stdout()` by default.
 
+<img src="https://user-images.githubusercontent.com/1086619/128244658-08518d8c-bf59-403b-ac70-f874d884e8b4.jpg" width="700"/>
+
 Unit tests
 -----
 
