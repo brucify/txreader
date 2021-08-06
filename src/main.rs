@@ -4,15 +4,14 @@ use txreader::tx;
 use txreader::cli;
 
 fn main() {
-    run()
+    block_on(run())
 }
 
-fn run() {
+async fn run() {
     env_logger::init();
     let args = cli::args();
     info!("Reading from path {:?}", args.path);
-    let fut = tx::read(&args.path);
-    match block_on(fut) {
+    match tx::read(&args.path).await {
         Ok(_) => info!("Done."),
         Err(error) => error!("Error: {:?}", error)
     }

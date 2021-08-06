@@ -56,24 +56,24 @@ impl Account {
 pub async fn read(path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
     let stdout = io::stdout();
     let mut lock = stdout.lock();
-    read_with(&mut lock, path)
+    read_with(&mut lock, path).await
 }
 
 /// Reads the transactions from a file and writes the serialized results to
 /// a given `std::io::Write` writer.
-fn read_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
-    let txns = read_txns(path)
+pub async fn read_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
+    let txns = read_txns(path).await
         .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
-    let txns_map = txns_to_map(txns);
-    let accounts = txns_map_to_accounts(txns_map);
-    print_accounts_with(writer, &accounts);
+    let txns_map = txns_to_map(txns).await;
+    let accounts = txns_map_to_accounts(txns_map).await;
+    print_accounts_with(writer, &accounts).await;
     Ok(())
 }
 
 /// Reads the file from path in parallel into a unordered
 /// `Vec<(usize, Transaction)`, where the `usize` is the
 /// original index of the Transaction.
-fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<(usize, Transaction)>> {
+async fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<(usize, Transaction)>> {
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
         .delimiter(b',')
@@ -97,7 +97,7 @@ fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<(usize, Transaction)>>
 /// Returns a `HashMap` where the key is a `u16` client id,
 /// and the value is a `Vec<(usize, Transaction)` that
 /// belongs to the client.
-fn txns_to_map(all_txns: Vec<(usize, Transaction)>) -> HashMap<u16, Vec<(usize, Transaction)>> {
+async fn txns_to_map(all_txns: Vec<(usize, Transaction)>) -> HashMap<u16, Vec<(usize, Transaction)>> {
     all_txns.into_iter().fold(
         HashMap::new(),
         | mut acc
@@ -112,7 +112,7 @@ fn txns_to_map(all_txns: Vec<(usize, Transaction)>) -> HashMap<u16, Vec<(usize, 
 
 /// Reads the `HashMap` in parallel, and returns a list of
 /// accounts as `Vec<Account>`.
-fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<(usize, Transaction)>>) -> Vec<Account> {
+async fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<(usize, Transaction)>>) -> Vec<Account> {
     txns_map.into_par_iter()
         .map(| (client_id, mut client_txns) | {
             client_txns.par_sort_by_key(|(i, _)| *i); // client_txns is unordered due to parallel deserialization
@@ -296,7 +296,7 @@ fn initial_txn<'a>(txns: &'a Vec<&'a Transaction>) -> Option<&'a &Transaction> {
 /// Wraps the `writer` in a `csv::Writer` and writes the accounts.
 /// The `csv::Writer` is already buffered so there is no need to wrap
 /// `writer` in a `io::BufWriter`.
-fn print_accounts_with(writer: &mut impl io::Write, accounts: &Vec<Account>) {
+async fn print_accounts_with(writer: &mut impl io::Write, accounts: &Vec<Account>) {
     let mut wtr = WriterBuilder::new()
         .has_headers(true)
         .from_writer(writer);
@@ -309,12 +309,13 @@ mod test {
     use crate::tx::*;
     use tempfile::NamedTempFile;
     use std::io::Write;
+    use futures::executor::block_on;
 
     #[test]
     fn test_read_with() -> Result<(), anyhow::Error> {
         let path = &std::path::PathBuf::from("transactions.csv");
         let mut result = Vec::new();
-        read_with(&mut result, path)?;
+        block_on(read_with(&mut result, path))?;
         let mut lines = std::str::from_utf8(&result)?.lines();
         let expected = vec![ "client_id,available,held,total,locked"
                            , "1,1.4996,0.0,1.4996,false"
@@ -349,7 +350,7 @@ mod test {
         /*
          * When
          */
-        let mut txns = read_txns(&std::path::PathBuf::from(path))?;
+        let mut txns = block_on(read_txns(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -407,8 +408,8 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let mut txns_map = txns_to_map(txns);
+        let txns = block_on(read_txns(&std::path::PathBuf::from(path)))?;
+        let mut txns_map = block_on(txns_to_map(txns));
 
         /*
          * Then
@@ -467,7 +468,7 @@ mod test {
         /*
          * When
          */
-        let mut accounts = txns_map_to_accounts(txns);
+        let mut accounts = block_on(txns_map_to_accounts(txns));
 
         /*
          * Then
@@ -510,9 +511,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -553,9 +552,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -609,9 +606,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let mut accounts = txns_map_to_accounts(txns_map);
+        let mut accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -683,9 +678,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let mut accounts = txns_map_to_accounts(txns_map);
+        let mut accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -756,9 +749,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let mut accounts = txns_map_to_accounts(txns_map);
+        let mut accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -797,9 +788,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -832,9 +821,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -868,9 +855,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -902,9 +887,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -937,9 +920,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -973,9 +954,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -1006,9 +985,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -1039,9 +1016,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -1072,9 +1047,7 @@ mod test {
         /*
          * When
          */
-        let txns = read_txns(&std::path::PathBuf::from(path))?;
-        let txns_map = txns_to_map(txns);
-        let accounts = txns_map_to_accounts(txns_map);
+        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
 
         /*
          * Then
@@ -1087,5 +1060,12 @@ mod test {
                                           }
                                  ]);
         Ok(())
+    }
+
+    fn accounts_from_path(path: &std::path::PathBuf) -> io::Result<Vec<Account>> {
+        let txns = block_on(read_txns(path))?;
+        let txns_map = block_on(txns_to_map(txns));
+        let accounts = block_on(txns_map_to_accounts(txns_map));
+        Ok(accounts)
     }
 }

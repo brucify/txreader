@@ -29,7 +29,7 @@ Usage
 -----
 
 ```rust
-let fut = tx::read(&std::path::PathBuf::from("transactions.csv"))
+let fut = tx::read(&std::path::PathBuf::from("transactions.csv"));
 block_on(fut).unwrap();
 ```
 This will write the results to `std::io::stdout()` by default.
