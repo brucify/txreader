@@ -31,7 +31,7 @@ enum TransactionKind {
 }
 
 #[derive(Debug, Serialize, PartialEq)]
-struct Account {
+pub struct Account {
     client_id:  u16,
     available:  Decimal,
     held:       Decimal,
@@ -62,12 +62,29 @@ pub async fn read(path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
 /// Reads the transactions from a file and writes the serialized results to
 /// a given `std::io::Write` writer.
 pub async fn read_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
-    let txns = read_txns(path).await
-        .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
-    let txns_map = txns_to_map(txns).await;
-    let accounts = txns_map_to_accounts(txns_map).await;
+    let accounts = accounts_from_path(path).await?;
     print_accounts_with(writer, &accounts).await;
     Ok(())
+}
+
+/// Reads the transactions from a file and returns `Vec<Account>` that
+/// contains a list of parsed accounts.
+pub async fn accounts_from_path(path: &std::path::PathBuf) -> Result<Vec<Account>, anyhow::Error> {
+    let txns = read_txns(path).await
+        .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
+    let txns_map = txns_to_map(txns);
+    let accounts = txns_map_to_accounts(txns_map).await;
+    Ok(accounts)
+}
+
+/// Wraps the `writer` in a `csv::Writer` and writes the accounts.
+/// The `csv::Writer` is already buffered so there is no need to wrap
+/// `writer` in a `io::BufWriter`.
+pub async fn print_accounts_with(writer: &mut impl io::Write, accounts: &Vec<Account>) {
+    let mut wtr = WriterBuilder::new()
+        .has_headers(true)
+        .from_writer(writer);
+    accounts.iter().for_each(|account| wtr.serialize(account).unwrap());
 }
 
 /// Reads the file from path in parallel into a unordered
@@ -97,7 +114,7 @@ async fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<(usize, Transact
 /// Returns a `HashMap` where the key is a `u16` client id,
 /// and the value is a `Vec<(usize, Transaction)` that
 /// belongs to the client.
-async fn txns_to_map(all_txns: Vec<(usize, Transaction)>) -> HashMap<u16, Vec<(usize, Transaction)>> {
+fn txns_to_map(all_txns: Vec<(usize, Transaction)>) -> HashMap<u16, Vec<(usize, Transaction)>> {
     all_txns.into_iter().fold(
         HashMap::new(),
         | mut acc
@@ -293,16 +310,6 @@ fn initial_txn<'a>(txns: &'a Vec<&'a Transaction>) -> Option<&'a &Transaction> {
     txns.iter().filter(|t| t.kind == Withdrawal || t.kind == Deposit).next()
 }
 
-/// Wraps the `writer` in a `csv::Writer` and writes the accounts.
-/// The `csv::Writer` is already buffered so there is no need to wrap
-/// `writer` in a `io::BufWriter`.
-async fn print_accounts_with(writer: &mut impl io::Write, accounts: &Vec<Account>) {
-    let mut wtr = WriterBuilder::new()
-        .has_headers(true)
-        .from_writer(writer);
-    accounts.iter().for_each(|account| wtr.serialize(account).unwrap());
-}
-
 #[cfg(test)]
 mod test {
     use common_macros::hash_map;
@@ -409,7 +416,7 @@ mod test {
          * When
          */
         let txns = block_on(read_txns(&std::path::PathBuf::from(path)))?;
-        let mut txns_map = block_on(txns_to_map(txns));
+        let mut txns_map = txns_to_map(txns);
 
         /*
          * Then
@@ -490,7 +497,7 @@ mod test {
     }
 
     #[test]
-    fn test_deposit() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_deposit() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -511,7 +518,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -527,7 +534,7 @@ mod test {
     }
 
     #[test]
-    fn test_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -552,7 +559,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -568,7 +575,7 @@ mod test {
     }
 
     #[test]
-    fn test_dispute() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_dispute() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -606,7 +613,7 @@ mod test {
         /*
          * When
          */
-        let mut accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let mut accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -629,7 +636,7 @@ mod test {
     }
 
     #[test]
-    fn test_resolve() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_resolve() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -678,7 +685,7 @@ mod test {
         /*
          * When
          */
-        let mut accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let mut accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -701,7 +708,7 @@ mod test {
     }
 
     #[test]
-    fn test_chargeback() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_chargeback() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -749,7 +756,7 @@ mod test {
         /*
          * When
          */
-        let mut accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let mut accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -772,7 +779,7 @@ mod test {
     }
 
     #[test]
-    fn test_withdraw_too_much() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_withdraw_too_much() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -788,7 +795,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -804,7 +811,7 @@ mod test {
     }
 
     #[test]
-    fn test_dispute_deposit() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_dispute_deposit() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -821,7 +828,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -837,7 +844,7 @@ mod test {
     }
 
     #[test]
-    fn test_dispute_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_dispute_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -855,7 +862,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -871,7 +878,7 @@ mod test {
     }
 
     #[test]
-    fn test_resolve_many_times() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_resolve_many_times() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -887,7 +894,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -903,7 +910,7 @@ mod test {
     }
 
     #[test]
-    fn test_chargeback_deposit() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_chargeback_deposit() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -920,7 +927,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -936,7 +943,7 @@ mod test {
     }
 
     #[test]
-    fn test_chargeback_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_chargeback_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -954,7 +961,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -970,7 +977,7 @@ mod test {
     }
 
     #[test]
-    fn test_withdraw_from_locked_account() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_withdraw_from_locked_account() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -985,7 +992,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -1001,7 +1008,7 @@ mod test {
     }
 
     #[test]
-    fn test_deposit_to_locked_account() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_deposit_to_locked_account() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -1016,7 +1023,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -1032,7 +1039,7 @@ mod test {
     }
 
     #[test]
-    fn test_resolve_locked_account() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_accounts_from_path_resolve_locked_account() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
          */
@@ -1047,7 +1054,7 @@ mod test {
         /*
          * When
          */
-        let accounts = accounts_from_path(&std::path::PathBuf::from(path))?;
+        let accounts = block_on(accounts_from_path(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
@@ -1060,12 +1067,5 @@ mod test {
                                           }
                                  ]);
         Ok(())
-    }
-
-    fn accounts_from_path(path: &std::path::PathBuf) -> io::Result<Vec<Account>> {
-        let txns = block_on(read_txns(path))?;
-        let txns_map = block_on(txns_to_map(txns));
-        let accounts = block_on(txns_map_to_accounts(txns_map));
-        Ok(accounts)
     }
 }
