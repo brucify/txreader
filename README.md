@@ -34,6 +34,28 @@ block_on(fut).unwrap();
 ```
 This will write the results to `std::io::stdout()` by default.
 
+Or run multiple file using `futures::future::join_all`:
+
+```rust
+let mut futures= vec![];
+let path1 = &std::path::PathBuf::from("transactions1.csv");
+let path2 = &std::path::PathBuf::from("transactions2.csv");
+futures.push(tx::accounts_from_path(path1));
+futures.push(tx::accounts_from_path(path2));
+
+let accounts = future::join_all(futures).await
+    .into_iter()
+    .filter_map(|x| x.ok())
+    .fold(vec![], |mut acc, mut vec| {
+        acc.append(&mut vec);
+        acc
+    });
+
+let stdout = io::stdout();
+let mut lock = stdout.lock();
+tx::print_accounts_with(&mut lock, &accounts).await;
+```
+
 <img src="https://user-images.githubusercontent.com/1086619/128244658-08518d8c-bf59-403b-ac70-f874d884e8b4.jpg" width="700"/>
 
 Unit tests
