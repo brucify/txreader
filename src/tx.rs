@@ -149,12 +149,10 @@ async fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<(usize, Transact
         .trim(Trim::All)
         .from_path(path)?;
 
-    // deserialize lines in file in parallel,
-    // while keeping the original index
     let all_txns: Vec<(usize, Transaction)> =
         rdr.deserialize::<Transaction>()
             .enumerate()
-            .par_bridge()
+            // .par_bridge()
             .filter_map(|(i, record)| {
                 record.map_or(None, |transaction| Some((i, transaction)))
             })
@@ -185,7 +183,7 @@ async fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<(usize, Transaction)>>)
     txns_map.into_par_iter()
     // txns_map.into_iter()
         .map(| (client_id, mut client_txns) | {
-            client_txns.par_sort_by_key(|(i, _)| *i); // client_txns is unordered due to parallel deserialization
+            // client_txns.par_sort_by_key(|(i, _)| *i); // client_txns is unordered due to parallel deserialization
             to_account(client_id, client_txns)
         })
         .collect()
