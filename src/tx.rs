@@ -9,6 +9,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Error, ErrorKind::{InvalidInput}};
+use rand::seq::SliceRandom;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 struct Transaction {
@@ -107,7 +108,7 @@ pub async fn print_accounts_with(writer: &mut impl io::Write, accounts: &Vec<Acc
 pub async fn generate_txns(num_txns: u32, num_clients: u16) {
     let txns =
         (0..num_txns).fold(vec![], |mut acc, _| {
-            let txn = random_txn(&num_clients);
+            let txn = random_txn(&acc, &num_clients);
             acc.push(txn);
             acc
         });
@@ -117,18 +118,24 @@ pub async fn generate_txns(num_txns: u32, num_clients: u16) {
     print_txns_with(&mut lock, &txns).await;
 }
 
-fn random_txn(num_clients: &u16) -> Transaction {
+fn random_txn(acc: &Vec<Transaction>, num_clients: &u16) -> Transaction {
     let mut rng = thread_rng();
-    let client_id: u16 = rng.gen_range(0..*num_clients);
-    let tx_id: u32 = rng.gen();
-    let a: i64 = rng.gen();
-    let (kind, amount) = match rng.gen_range(0..4) {
-        0 => (TransactionKind::Deposit, Some(a)),
-        1 => (TransactionKind::Withdrawal, Some(a)),
-        2 => (TransactionKind::Dispute, None),
-        3 => (TransactionKind::Resolve, None),
-        _ => (TransactionKind::Chargeback, None),
-    };
+    let (kind, client_id, tx_id, amount) =
+        match acc.choose(&mut rng) {
+            Some(txn) =>
+                match rng.gen_range(0..=4) {
+                    0 => (TransactionKind::Deposit, rng.gen_range(0..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
+                    1 => (TransactionKind::Withdrawal, rng.gen_range(0..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
+                    2 => (TransactionKind::Dispute, txn.client_id, txn.tx_id, None),
+                    3 => (TransactionKind::Resolve, txn.client_id, txn.tx_id, None),
+                    _ => (TransactionKind::Chargeback, txn.client_id, txn.tx_id, None),
+                },
+            None =>
+                match rng.gen_range(0..=1) {
+                    0 => (TransactionKind::Deposit, rng.gen_range(0..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
+                    _ => (TransactionKind::Withdrawal, rng.gen_range(0..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
+                }
+        };
     Transaction::new(kind, client_id, tx_id, amount)
 }
 
