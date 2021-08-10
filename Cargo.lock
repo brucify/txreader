@@ -689,6 +689,7 @@ dependencies = [
  "env_logger",
  "futures",
  "log",
+ "rand",
  "rayon",
  "rust_decimal",
  "rust_decimal_macros",

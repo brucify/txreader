@@ -5,6 +5,7 @@ use txreader::cli;
 
 fn main() {
     block_on(run())
+    // block_on(tx::generate_txns(10000, 100));
 }
 
 async fn run() {

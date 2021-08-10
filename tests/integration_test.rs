@@ -2,7 +2,7 @@ use futures::executor::block_on;
 use futures::future;
 use std::io::{self, Write};
 use std::time::Instant;
-use txreader::tx::{Account};
+use txreader::tx::Account;
 use txreader::tx;
 
 #[test]
@@ -33,7 +33,7 @@ fn test_read_multiple_files_non_blocking() -> Result<(), anyhow::Error> {
 }
 
 async fn read_multiple_files_sequentially_1() -> Result<(), anyhow::Error> {
-    for _ in 0..10000 {
+    for _ in 0..50 {
         tx::read(&std::path::PathBuf::from("transactions.csv")).await?;
     }
     Ok(())
@@ -41,7 +41,7 @@ async fn read_multiple_files_sequentially_1() -> Result<(), anyhow::Error> {
 
 async fn read_multiple_files_sequentially_2() -> Result<(), anyhow::Error> {
     let mut l: Vec<Account> = vec![];
-    for _ in 0..10000 {
+    for _ in 0..50 {
         let mut vec = tx::accounts_from_path(&std::path::PathBuf::from("transactions.csv")).await?;
         l.append(&mut vec);
     }
@@ -54,7 +54,7 @@ async fn read_multiple_files_sequentially_2() -> Result<(), anyhow::Error> {
 async fn read_multiple_files_non_blocking() -> Result<(), anyhow::Error> {
     let path = &std::path::PathBuf::from("transactions.csv");
     let mut futures= vec![];
-    (0..10000).for_each(|_| futures.push(tx::accounts_from_path(path)));
+    (0..50).for_each(|_| futures.push(tx::accounts_from_path(path)));
 
     let accounts = future::join_all(futures).await
         .into_iter()

@@ -3,13 +3,14 @@ use anyhow::Context;
 use csv::{ReaderBuilder, Trim, WriterBuilder};
 use log::debug;
 use rayon::prelude::*;
+use rand::{thread_rng, Rng};
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Error, ErrorKind::{InvalidInput}};
 
-#[derive(Debug, Deserialize, PartialEq)]
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
 struct Transaction {
     #[serde(rename = "type")]
     kind:       TransactionKind,
@@ -20,8 +21,23 @@ struct Transaction {
     amount:     Option<Decimal>,
 }
 
-#[derive(Debug, Deserialize, PartialEq)]
-#[serde(rename_all(deserialize = "lowercase"))]
+impl Transaction {
+    pub fn new( kind: TransactionKind
+              , client_id: u16
+              , tx_id: u32
+              , a: Option<i64>
+              ) -> Transaction {
+        Transaction {
+            kind,
+            client_id,
+            tx_id,
+            amount: a.and_then(|x| Some(Decimal::new(x, 4)))
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Serialize, PartialEq)]
+#[serde(rename_all(deserialize = "lowercase", serialize = "lowercase"))]
 enum TransactionKind {
     Deposit,
     Withdrawal,
@@ -87,6 +103,42 @@ pub async fn print_accounts_with(writer: &mut impl io::Write, accounts: &Vec<Acc
     accounts.iter().for_each(|account| wtr.serialize(account).unwrap());
 }
 
+/// Generate and print a list of random transactions.
+pub async fn generate_txns(num_txns: u32, num_clients: u16) {
+    let txns =
+        (0..num_txns).fold(vec![], |mut acc, _| {
+            let txn = random_txn(&num_clients);
+            acc.push(txn);
+            acc
+        });
+
+    let stdout = io::stdout();
+    let mut lock = stdout.lock();
+    print_txns_with(&mut lock, &txns).await;
+}
+
+fn random_txn(num_clients: &u16) -> Transaction {
+    let mut rng = thread_rng();
+    let client_id: u16 = rng.gen_range(0..*num_clients);
+    let tx_id: u32 = rng.gen();
+    let a: i64 = rng.gen();
+    let (kind, amount) = match rng.gen_range(0..4) {
+        0 => (TransactionKind::Deposit, Some(a)),
+        1 => (TransactionKind::Withdrawal, Some(a)),
+        2 => (TransactionKind::Dispute, None),
+        3 => (TransactionKind::Resolve, None),
+        _ => (TransactionKind::Chargeback, None),
+    };
+    Transaction::new(kind, client_id, tx_id, amount)
+}
+
+async fn print_txns_with(writer: &mut impl io::Write, txns: &Vec<Transaction>) {
+    let mut wtr = WriterBuilder::new()
+        .has_headers(true)
+        .from_writer(writer);
+    txns.iter().for_each(|txn| wtr.serialize(txn).unwrap());
+}
+
 /// Reads the file from path in parallel into a unordered
 /// `Vec<(usize, Transaction)`, where the `usize` is the
 /// original index of the Transaction.
@@ -131,6 +183,7 @@ fn txns_to_map(all_txns: Vec<(usize, Transaction)>) -> HashMap<u16, Vec<(usize, 
 /// accounts as `Vec<Account>`.
 async fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<(usize, Transaction)>>) -> Vec<Account> {
     txns_map.into_par_iter()
+    // txns_map.into_iter()
         .map(| (client_id, mut client_txns) | {
             client_txns.par_sort_by_key(|(i, _)| *i); // client_txns is unordered due to parallel deserialization
             to_account(client_id, client_txns)
@@ -320,7 +373,7 @@ mod test {
 
     #[test]
     fn test_read_with() -> Result<(), anyhow::Error> {
-        let path = &std::path::PathBuf::from("transactions.csv");
+        let path = &std::path::PathBuf::from("transactions_simple.csv");
         let mut result = Vec::new();
         block_on(read_with(&mut result, path))?;
         let mut lines = std::str::from_utf8(&result)?.lines();
