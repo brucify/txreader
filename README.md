@@ -24,6 +24,9 @@ Alternatively set the environment variable`RUST_LOG` to `info` or `debug` to see
 
     $ RUST_LOG=debug cargo run -- transactions.csv
 
+To generate a list of random transactions for testing, use the `--generate` flag:
+
+    $ cargo run -- --generate > transactions.csv
 
 Usage
 -----
