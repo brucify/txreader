@@ -3,6 +3,26 @@ txreader
 
 A Rust CLI application
 
+```shell
+txreader 0.1.0
+
+USAGE:
+    txreader [FLAGS] [OPTIONS] <path>
+
+FLAGS:
+    -G, --generate    Generates a list of random transactions
+    -h, --help        Prints help information
+    -V, --version     Prints version information
+
+OPTIONS:
+    -c, --clients <num-clients>      Number of clients in the generated transactions [default: 100]
+    -t, --transactions <num-txns>    Number of transactions to generate [default: 10000]
+
+ARGS:
+    <path>    Path to the csv file that contains transactions. Optional if --generate is set
+```
+
+
 Build
 -----
 
@@ -20,9 +40,12 @@ Or
 
 A sample `transactions.csv` is included.
 
-Alternatively set the environment variable`RUST_LOG` to `info` or `debug` to see more logs.
+Optionally, set the environment variable`RUST_LOG` to `info` or `debug` to see more logs.
 
     $ RUST_LOG=debug cargo run -- transactions.csv
+
+Generate test transactions
+-----
 
 To generate a list of random transactions for testing, use the `--generate` flag:
 
@@ -30,7 +53,8 @@ To generate a list of random transactions for testing, use the `--generate` flag
 
 Generate 1,000,000 (default 10,000) transactions for 500 (default 100) clients:  
 
-    $ cargo run -- --generate -t 1000000 -c 500 > transactions.csv
+    $ cargo run -- --generate -t 1000000 -c 500 > 1m_transactions.csv
+
 Usage
 -----
 
@@ -72,24 +96,24 @@ Unit tests
      Running unittests (target/debug/deps/txreader-b64430a6c1410750)
 
     running 18 tests
-    test tx::test::test_dispute_withdrawal ... ok
-    test tx::test::test_deposit_to_locked_account ... ok
-    test tx::test::test_deposit ... ok
-    test tx::test::test_chargeback_withdrawal ... ok
-    test tx::test::test_dispute_deposit ... ok
-    test tx::test::test_chargeback_deposit ... ok
+    test tx::test::test_accounts_from_path_dispute_deposit ... ok
+    test tx::test::test_accounts_from_path_deposit ... ok
+    test tx::test::test_accounts_from_path_dispute_withdrawal ... ok
+    test tx::test::test_accounts_from_path_chargeback_withdrawal ... ok
+    test tx::test::test_accounts_from_path_chargeback_deposit ... ok
+    test tx::test::test_accounts_from_path_deposit_to_locked_account ... ok
+    test tx::test::test_accounts_from_path_dispute ... ok
+    test tx::test::test_accounts_from_path_chargeback ... ok
+    test tx::test::test_accounts_from_path_withdraw_from_locked_account ... ok
+    test tx::test::test_accounts_from_path_resolve_locked_account ... ok
+    test tx::test::test_accounts_from_path_withdraw_too_much ... ok
+    test tx::test::test_accounts_from_path_resolve_many_times ... ok
+    test tx::test::test_accounts_from_path_withdrawal ... ok
     test tx::test::test_txns_map_to_accounts ... ok
-    test tx::test::test_read_with ... ok
     test tx::test::test_read_txns ... ok
-    test tx::test::test_dispute ... ok
-    test tx::test::test_resolve_locked_account ... ok
-    test tx::test::test_chargeback ... ok
+    test tx::test::test_read_with ... ok
+    test tx::test::test_accounts_from_path_resolve ... ok
     test tx::test::test_txns_to_map ... ok
-    test tx::test::test_resolve_many_times ... ok
-    test tx::test::test_resolve ... ok
-    test tx::test::test_withdraw_from_locked_account ... ok
-    test tx::test::test_withdrawal ... ok
-    test tx::test::test_withdraw_too_much ... ok
     
     test result: ok. 18 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s
 
