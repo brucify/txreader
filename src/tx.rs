@@ -124,16 +124,16 @@ fn random_txn(acc: &Vec<Transaction>, num_clients: &u16) -> Transaction {
         match acc.choose(&mut rng) {
             Some(txn) =>
                 match rng.gen_range(0..=4) {
-                    0 => (TransactionKind::Deposit, rng.gen_range(0..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
-                    1 => (TransactionKind::Withdrawal, rng.gen_range(0..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
+                    0 => (TransactionKind::Deposit, rng.gen_range(1..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
+                    1 => (TransactionKind::Withdrawal, rng.gen_range(1..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
                     2 => (TransactionKind::Dispute, txn.client_id, txn.tx_id, None),
                     3 => (TransactionKind::Resolve, txn.client_id, txn.tx_id, None),
                     _ => (TransactionKind::Chargeback, txn.client_id, txn.tx_id, None),
                 },
             None =>
                 match rng.gen_range(0..=1) {
-                    0 => (TransactionKind::Deposit, rng.gen_range(0..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
-                    _ => (TransactionKind::Withdrawal, rng.gen_range(0..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
+                    0 => (TransactionKind::Deposit, rng.gen_range(1..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
+                    _ => (TransactionKind::Withdrawal, rng.gen_range(1..=*num_clients), rng.gen::<u32>(), Some(rng.gen::<i64>().abs())),
                 }
         };
     Transaction::new(kind, client_id, tx_id, amount)

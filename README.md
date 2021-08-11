@@ -28,6 +28,9 @@ To generate a list of random transactions for testing, use the `--generate` flag
 
     $ cargo run -- --generate > transactions.csv
 
+Generate 1,000,000 (default 10,000) transactions for 500 (default 100) clients:  
+
+    $ cargo run -- --generate -t 1000000 -c 500 > transactions.csv
 Usage
 -----
 
