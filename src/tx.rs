@@ -156,8 +156,6 @@ async fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<Transaction>> {
 
     let all_txns: Vec<Transaction> =
         rdr.deserialize::<Transaction>()
-            // .enumerate()
-            // .par_bridge()
             .filter_map(|record| record.ok())
             .collect();
 
@@ -184,10 +182,7 @@ fn txns_to_map(all_txns: Vec<Transaction>) -> HashMap<u16, Vec<Transaction>> {
 /// accounts as `Vec<Account>`.
 async fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<Transaction>>) -> Vec<Account> {
     txns_map.into_par_iter()
-        .map(| (client_id, client_txns) | {
-            // client_txns.par_sort_by_key(|(i, _)| *i); // client_txns is unordered due to parallel deserialization
-            to_account(client_id, client_txns)
-        })
+        .map(| (client_id, client_txns) | to_account(client_id, client_txns))
         .collect()
 }
 
