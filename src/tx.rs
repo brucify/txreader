@@ -146,50 +146,45 @@ async fn print_txns_with(writer: &mut impl io::Write, txns: &Vec<Transaction>) {
     txns.iter().for_each(|txn| wtr.serialize(txn).unwrap());
 }
 
-/// Reads the file from path in parallel into a unordered
-/// `Vec<(usize, Transaction)`, where the `usize` is the
-/// original index of the Transaction.
-async fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<(usize, Transaction)>> {
+/// Reads the file from path into an ordered `Vec<Transaction>`.
+async fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<Transaction>> {
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
         .delimiter(b',')
         .trim(Trim::All)
         .from_path(path)?;
 
-    let all_txns: Vec<(usize, Transaction)> =
+    let all_txns: Vec<Transaction> =
         rdr.deserialize::<Transaction>()
-            .enumerate()
+            // .enumerate()
             // .par_bridge()
-            .filter_map(|(i, record)| {
-                record.map_or(None, |transaction| Some((i, transaction)))
-            })
+            .filter_map(|record| record.ok())
             .collect();
 
     Ok(all_txns)
 }
 
 /// Returns a `HashMap` where the key is a `u16` client id,
-/// and the value is a `Vec<(usize, Transaction)` that
+/// and the value is a `Vec<Transaction>` that
 /// belongs to the client.
-fn txns_to_map(all_txns: Vec<(usize, Transaction)>) -> HashMap<u16, Vec<(usize, Transaction)>> {
+fn txns_to_map(all_txns: Vec<Transaction>) -> HashMap<u16, Vec<Transaction>> {
     all_txns.into_iter().fold(
         HashMap::new(),
         | mut acc
-        , (i, txn): (usize, Transaction)
+        , txn: Transaction
         | {
             acc.entry(txn.client_id)
                 .or_insert(vec![])
-                .push((i, txn));
+                .push(txn);
             acc
         })
 }
 
 /// Reads the `HashMap` in parallel, and returns a list of
 /// accounts as `Vec<Account>`.
-async fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<(usize, Transaction)>>) -> Vec<Account> {
+async fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<Transaction>>) -> Vec<Account> {
     txns_map.into_par_iter()
-    // txns_map.into_iter()
-        .map(| (client_id, mut client_txns) | {
+        .map(| (client_id, client_txns) | {
             // client_txns.par_sort_by_key(|(i, _)| *i); // client_txns is unordered due to parallel deserialization
             to_account(client_id, client_txns)
         })
@@ -198,12 +193,12 @@ async fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<(usize, Transaction)>>)
 
 /// Reads a sorted list of `Transaction`, and returns an
 /// `Account` for a client.
-fn to_account(client_id: u16, client_txns: Vec<(usize, Transaction)>) -> Account {
+fn to_account(client_id: u16, client_txns: Vec<Transaction>) -> Account {
     let (account, _) =
         client_txns.iter().fold(
             (Account::new(client_id), HashMap::new()),
             | (mut account, mut handled): (Account, HashMap<u32, Vec<&Transaction>>)
-            , (_i, txn): &(usize, Transaction)
+            , txn: &Transaction
             | {
                 match handle_txn(&mut account, &handled, txn) {
                     Ok(()) => handled.entry(txn.tx_id).or_insert(vec![]).push(&txn), // only insert when txn ok
@@ -415,38 +410,38 @@ mod test {
         /*
          * When
          */
-        let mut txns = block_on(read_txns(&std::path::PathBuf::from(path)))?;
+        let txns = block_on(read_txns(&std::path::PathBuf::from(path)))?;
 
         /*
          * Then
          */
-        txns.sort_by_key(|(i, _)| *i);
+        // txns.sort_by_key(|(i, _)| *i);
         let mut iter = txns.into_iter();
-        assert_eq!(iter.next(), Some((0, Transaction{ kind:      Deposit
-                                                    , client_id: 1
-                                                    , tx_id:     1
-                                                    , amount:    Some(dec!(1.001))
-                                                    })));
-        assert_eq!(iter.next(), Some((1, Transaction{ kind:      Withdrawal
-                                                    , client_id: 2
-                                                    , tx_id:     2
-                                                    , amount:    Some(dec!(2.0002))
-                                                    })));
-        assert_eq!(iter.next(), Some((2, Transaction{ kind:      Dispute
-                                                    , client_id: 3
-                                                    , tx_id:     3
-                                                    , amount:    None
-                                                    })));
-        assert_eq!(iter.next(), Some((3, Transaction{ kind:      Resolve
-                                                    , client_id: 4
-                                                    , tx_id:     4
-                                                    , amount:    None
-                                                    })));
-        assert_eq!(iter.next(), Some((4, Transaction{ kind: Chargeback
-                                                    , client_id: 5
-                                                    , tx_id:     5
-                                                    , amount:    None
-                                                    })));
+        assert_eq!(iter.next(), Some(Transaction{ kind:      Deposit
+                                                , client_id: 1
+                                                , tx_id:     1
+                                                , amount:    Some(dec!(1.001))
+                                                }));
+        assert_eq!(iter.next(), Some(Transaction{ kind:      Withdrawal
+                                                , client_id: 2
+                                                , tx_id:     2
+                                                , amount:    Some(dec!(2.0002))
+                                                }));
+        assert_eq!(iter.next(), Some(Transaction{ kind:      Dispute
+                                                , client_id: 3
+                                                , tx_id:     3
+                                                , amount:    None
+                                                }));
+        assert_eq!(iter.next(), Some(Transaction{ kind:      Resolve
+                                                , client_id: 4
+                                                , tx_id:     4
+                                                , amount:    None
+                                                }));
+        assert_eq!(iter.next(), Some(Transaction{ kind: Chargeback
+                                                , client_id: 5
+                                                , tx_id:     5
+                                                , amount:    None
+                                                }));
         assert_eq!(iter.next(), None);
         Ok(())
     }
@@ -474,24 +469,24 @@ mod test {
          * When
          */
         let txns = block_on(read_txns(&std::path::PathBuf::from(path)))?;
-        let mut txns_map = txns_to_map(txns);
+        let txns_map = txns_to_map(txns);
 
         /*
          * Then
          */
-        txns_map.iter_mut().for_each(|(_k, v)| v.sort_by_key(|(i, _)| *i) );
-        assert_eq!(txns_map.get(&1), Some(&vec![ (0, Transaction{ kind: Deposit, client_id: 1, tx_id: 1, amount: Some(dec!(1.0)) })
-                                                , (2, Transaction{ kind: Deposit, client_id: 1, tx_id: 3, amount: Some(dec!(2.0)) })
-                                                , (3, Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4, amount: Some(dec!(1.5)) })
+        // txns_map.iter_mut().for_each(|(_k, v)| v.sort_by_key(|(i, _)| *i) );
+        assert_eq!(txns_map.get(&1), Some(&vec![ Transaction{ kind: Deposit, client_id: 1, tx_id: 1, amount: Some(dec!(1.0)) }
+                                                , Transaction{ kind: Deposit, client_id: 1, tx_id: 3, amount: Some(dec!(2.0)) }
+                                                , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4, amount: Some(dec!(1.5)) }
                                                 ]));
-        assert_eq!(txns_map.get(&2), Some(&vec![ (1, Transaction{ kind: Deposit, client_id: 2, tx_id: 2, amount: Some(dec!(2.0)) })
-                                                , (4, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 5, amount: Some(dec!(3.0)) })
+        assert_eq!(txns_map.get(&2), Some(&vec![ Transaction{ kind: Deposit, client_id: 2, tx_id: 2, amount: Some(dec!(2.0)) }
+                                                , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 5, amount: Some(dec!(3.0)) }
                                                 ]));
         assert_eq!(txns_map.get(&3), None);
-        assert_eq!(txns_map.get(&4), Some(&vec![ (5, Transaction{ kind: Dispute, client_id: 4, tx_id: 4, amount: None })
-                                                , (6, Transaction{ kind: Resolve, client_id: 4, tx_id: 4, amount: None })
+        assert_eq!(txns_map.get(&4), Some(&vec![ Transaction{ kind: Dispute, client_id: 4, tx_id: 4, amount: None }
+                                                , Transaction{ kind: Resolve, client_id: 4, tx_id: 4, amount: None }
                                                 ]));
-        assert_eq!(txns_map.get(&5), Some(&vec![ (7, Transaction{ kind: Chargeback, client_id: 5, tx_id: 5, amount: None })
+        assert_eq!(txns_map.get(&5), Some(&vec![ Transaction{ kind: Chargeback, client_id: 5, tx_id: 5, amount: None }
                                                 ]));
         Ok(())
     }
@@ -502,33 +497,33 @@ mod test {
          * Given
          */
         let txns =
-            hash_map!( 1 => vec![ (1,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(dec!(1.0001)) }) // +1.0001
-                                , (3,  Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(dec!(2.00002)) }) // +2.0
-                                , (4,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(1.5001)) }) // -1.5001
-                                , (5,  Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(10.0)) }) // ignore
-                                , (6,  Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None }) // ignore
-                                , (6,  Transaction{ kind: Chargeback, client_id: 1, tx_id: 3,   amount: None }) // ignore
-                                , (7,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None }) // hold 2.0
-                                , (8,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None }) // ignore
-                                , (9,  Transaction{ kind: Dispute,    client_id: 1, tx_id: 100, amount: None }) // ignore
-                                , (10, Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None }) // release 2.0
-                                , (11, Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None }) // hold 1.5001
-                                , (12, Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None }) // revert 1.5001, freeze
-                                , (13, Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(dec!(2.0)) }) // ignore
+            hash_map!( 1 => vec![ Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(dec!(1.0001)) } // +1.0001
+                                , Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(dec!(2.00002)) } // +2.0
+                                , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(1.5001)) } // -1.5001
+                                , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(10.0)) } // ignore
+                                , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // ignore
+                                , Transaction{ kind: Chargeback, client_id: 1, tx_id: 3,   amount: None } // ignore
+                                , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // hold 2.0
+                                , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // ignore
+                                , Transaction{ kind: Dispute,    client_id: 1, tx_id: 100, amount: None } // ignore
+                                , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // release 2.0
+                                , Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None } // hold 1.5001
+                                , Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None } // revert 1.5001, freeze
+                                , Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(dec!(2.0)) } // ignore
                                 ]
-                     , 2 => vec![ (14, Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(dec!(5.0)) }) // +5.0
-                                , (15, Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(dec!(10.0)) }) // +10.0
-                                , (16, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(dec!(1.5)) }) // -1.5
-                                , (17, Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(dec!(10.0)) }) // -10.0
-                                , (18, Transaction{ kind: Resolve,    client_id: 2, tx_id: 103, amount: None }) // ignore
-                                , (19, Transaction{ kind: Chargeback, client_id: 2, tx_id: 103, amount: None }) // ignore
-                                , (20, Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None }) // hold 10.0
-                                , (21, Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None }) // hold 5.0
-                                , (22, Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None }) // ignore
-                                , (23, Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None }) // release 5.0
-                                , (24, Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None }) // hold 5.0
-                                , (25, Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None }) // revert 10.0, freeze
-                                , (26, Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(dec!(20.0)) }) // ignore
+                     , 2 => vec![ Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(dec!(5.0)) } // +5.0
+                                , Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(dec!(10.0)) } // +10.0
+                                , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(dec!(1.5)) } // -1.5
+                                , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(dec!(10.0)) } // -10.0
+                                , Transaction{ kind: Resolve,    client_id: 2, tx_id: 103, amount: None } // ignore
+                                , Transaction{ kind: Chargeback, client_id: 2, tx_id: 103, amount: None } // ignore
+                                , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // hold 10.0
+                                , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
+                                , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // ignore
+                                , Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None } // release 5.0
+                                , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
+                                , Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None } // revert 10.0, freeze
+                                , Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(dec!(20.0)) } // ignore
                                 ]);
         /*
          * When
