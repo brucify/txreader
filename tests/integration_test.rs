@@ -6,7 +6,6 @@ use txreader::tx::Account;
 use txreader::tx;
 
 #[test]
-#[ignore]
 fn test_read_multiple_files_sequentially_1() -> Result<(), anyhow::Error> {
     let now = Instant::now();
     assert_eq!(block_on(read_multiple_files_sequentially_1())?, ());
@@ -16,7 +15,6 @@ fn test_read_multiple_files_sequentially_1() -> Result<(), anyhow::Error> {
 }
 
 #[test]
-#[ignore]
 fn test_read_multiple_files_sequentially_2() -> Result<(), anyhow::Error> {
     let now = Instant::now();
     assert_eq!(block_on(read_multiple_files_sequentially_2())?, ());
@@ -26,7 +24,6 @@ fn test_read_multiple_files_sequentially_2() -> Result<(), anyhow::Error> {
 }
 
 #[test]
-#[ignore]
 fn test_read_multiple_files_non_blocking() -> Result<(), anyhow::Error> {
     let now = Instant::now();
     assert_eq!(block_on(read_multiple_files_non_blocking())?, ());

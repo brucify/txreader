@@ -2,17 +2,15 @@ use anyhow::Context;
 use crate::tx::TransactionKind::*;
 use csv::{ReaderBuilder, Trim, WriterBuilder};
 use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
-use futures::executor::ThreadPool;
 use futures::{StreamExt, future};
 use log::{debug, info};
 use rand::seq::SliceRandom;
 use rand::{thread_rng, Rng};
-use rayon::prelude::*;
 use rust_decimal::prelude::*;
 use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{self, Error, ErrorKind::{InvalidInput}, Write};
+use std::io::{self, Error, ErrorKind::{InvalidInput}};
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 struct Transaction {
@@ -94,42 +92,16 @@ pub async fn read_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -
 
 /// Reads the transactions from a file and returns `Vec<Account>` that
 /// contains a list of parsed accounts.
-pub async fn accounts_from_path0(path: &std::path::PathBuf) -> Result<Vec<Account>, anyhow::Error> {
-    let now = std::time::Instant::now();
-    let txns = read_txns(path).await
-        .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
-    info!("read_txns done. Elapsed: {:.2?}", now.elapsed());
-
-    let now = std::time::Instant::now();
-    let txns_map = txns_to_map(txns);
-    info!("txns_to_map done. Elapsed: {:.2?}", now.elapsed());
-
-    let now = std::time::Instant::now();
-    let accounts = txns_map_to_accounts(txns_map).await;
-    info!("txns_map_to_accounts done. Elapsed: {:.2?}", now.elapsed());
-
-    Ok(accounts)
-}
-
-/// Reads the transactions from a file and returns `Vec<Account>` that
-/// contains a list of parsed accounts.
 pub async fn accounts_from_path(path: &std::path::PathBuf) -> Result<Vec<Account>, anyhow::Error> {
     let now = std::time::Instant::now();
-    let pool = ThreadPool::new()?;
-    let txns = read_txns(path).await
+    let txns_map = read_to_streams(path).await
         .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
-    writeln!(io::stdout(), "read_txns done. Elapsed: {:.2?}", now.elapsed())?;
-
-    let txns_map = txns_to_streams(txns, &pool);
-    writeln!(io::stdout(), "txns_to_streams done. Elapsed: {:.2?}", now.elapsed())?;
-
-
+    info!("read_to_streams done. Elapsed: {:.2?}", now.elapsed());
+    let now = std::time::Instant::now();
     let accounts = streams_to_accounts(txns_map).await;
-    writeln!(io::stdout(), "streams_to_accounts done. Elapsed: {:.2?}", now.elapsed())?;
-
+    info!("streams_to_accounts done. Elapsed: {:.2?}", now.elapsed());
     Ok(accounts)
 }
-
 
 /// Wraps the `writer` in a `csv::Writer` and writes the accounts.
 /// The `csv::Writer` is already buffered so there is no need to wrap
@@ -183,8 +155,12 @@ async fn print_txns_with(writer: &mut impl io::Write, txns: &Vec<Transaction>) {
     txns.iter().for_each(|txn| wtr.serialize(txn).unwrap());
 }
 
-/// Reads the file from path into an ordered `Vec<Transaction>`.
-async fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<Transaction>> {
+/// Reads the file from path, and returns
+/// a `HashMap` where the key is a `u16` client id,
+/// and the value is a tuple of
+/// `(UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)`
+/// produced by `mpsc::unbounded::<Transaction>()`.
+async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<HashMap<u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)>> {
     let now = std::time::Instant::now();
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
@@ -194,54 +170,21 @@ async fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<Transaction>> {
     info!("ReaderBuilder::from_path done. Elapsed: {:.2?}", now.elapsed());
 
     let now = std::time::Instant::now();
-    let all_txns: Vec<Transaction> =
+    let map =
         rdr.deserialize::<Transaction>()
             .filter_map(|record| record.ok())
-            .collect();
+            .fold(
+                HashMap::new(),
+                | mut map, txn: Transaction| {
+                    let (tx, _rx) =
+                        map.entry(txn.client_id)
+                            .or_insert(mpsc::unbounded::<Transaction>());
+                    tx.unbounded_send(txn).expect("Failed to send");
+                    map
+                });
     info!("reader::deserialize done. Elapsed: {:.2?}", now.elapsed());
 
-    Ok(all_txns)
-}
-
-/// Returns a `HashMap` where the key is a `u16` client id,
-/// and the value is a `Vec<Transaction>` that
-/// belongs to the client.
-fn txns_to_map(all_txns: Vec<Transaction>) -> HashMap<u16, Vec<Transaction>> {
-    all_txns.into_iter().fold(
-        HashMap::new(),
-        | mut acc
-        , txn: Transaction
-        | {
-            acc.entry(txn.client_id)
-                .or_insert(vec![])
-                .push(txn);
-            acc
-        })
-}
-
-/// Returns a `HashMap` where the key is a `u16` client id,
-/// and the value is a tuple of
-/// `(UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)`
-/// produced by `mpsc::unbounded::<Transaction>()`.
-fn txns_to_streams(all_txns: Vec<Transaction>, pool: &ThreadPool) -> HashMap<u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)> {
-    let (map, vec) =
-        all_txns.into_iter().fold(
-            (HashMap::new(), Vec::new()),
-            | (mut map, mut vec)
-            , txn: Transaction
-            | {
-                let (tx0, _rx0) =
-                    map.entry(txn.client_id)
-                        .or_insert(mpsc::unbounded::<Transaction>());
-                let tx = tx0.clone();
-                let fut = async move {
-                    tx.unbounded_send(txn).expect("Failed to send");
-                };
-                vec.push(fut);
-                (map, vec)
-            });
-    vec.into_iter().for_each(|fut| pool.spawn_ok(fut));
-    map
+    Ok(map)
 }
 
 /// Reads the `HashMap` in parallel, and returns a list of
@@ -255,34 +198,6 @@ async fn streams_to_accounts(map: HashMap<u16, (UnboundedSender<Transaction>, Un
     future::join_all(futures).await
 }
 
-/// Reads the `HashMap` in parallel, and returns a list of
-/// accounts as `Vec<Account>`.
-async fn txns_map_to_accounts(txns_map: HashMap<u16, Vec<Transaction>>) -> Vec<Account> {
-    txns_map.into_par_iter()
-        .map(| (client_id, client_txns) | to_account(client_id, client_txns))
-        .collect()
-}
-
-/// Reads a sorted list of `Transaction`, and returns an
-/// `Account` for a client.
-fn to_account(client_id: u16, client_txns: Vec<Transaction>) -> Account {
-    let (account, _) =
-        client_txns.into_iter().fold(
-            (Account::new(client_id), HashMap::new()),
-            | (mut account, mut handled): (Account, HashMap<u32, Vec<Transaction>>)
-            , txn: Transaction
-            | {
-                let txn_id = txn.tx_id;
-                match handle_txn(&mut account, &handled, &txn) {
-                    Ok(()) => handled.entry(txn_id).or_insert(vec![]).push(txn), // only insert when txn ok
-                    _ => debug!("Ignoring invalid transaction: {:?}", txn)
-                };
-                (account, handled)
-            }
-        );
-    account
-}
-
 async fn stream_to_account(client_id: u16, rx: UnboundedReceiver<Transaction>) -> Account {
     let (account, _) =
         rx.fold(
@@ -292,7 +207,9 @@ async fn stream_to_account(client_id: u16, rx: UnboundedReceiver<Transaction>) -
             | async move {
                 let txn_id = txn.tx_id;
                 match handle_txn(&mut account, &handled, &txn) {
-                    Ok(()) => handled.entry(txn_id).or_insert(vec![]).push(txn), // only insert when txn ok
+                    // only insert when txn is ok
+                    Ok(()) => handled.entry(txn_id).or_insert(vec![]).push(txn),
+                    // ignore bad txns
                     _ => debug!("Ignoring invalid transaction: {:?}", txn)
                 };
                 (account, handled)
@@ -463,7 +380,6 @@ mod test {
     use futures::executor::block_on;
 
     #[test]
-    #[ignore]
     fn test_read_with() -> Result<(), anyhow::Error> {
         let path = &std::path::PathBuf::from("transactions_simple.csv");
         let mut result = Vec::new();
@@ -480,150 +396,50 @@ mod test {
     }
 
     #[test]
-    #[ignore]
-    fn test_read_txns() -> Result<(), Box<dyn std::error::Error>> {
+    fn test_streams_to_accounts() {
         /*
          * Given
          */
-        let mut file = NamedTempFile::new()?;
-        writeln!(file, "type,client,tx,amount
-                        deposit,1,1,1.001
-                        withdrawal,2,2,2.0002
-                        dispute,3,3,
-                        resolve,4,4,
-                        chargeback,5,5,
-                        bad line
-                        chargeback,5,5
-                        deposit,1,1,1.0,1.0
-                        deposit,x,1,1.0
-                        deposit,1,x,1.0
-                        deposit,1,1,x")?;
-        let path = file.path().to_str().unwrap();
-
+        let vec1 = vec![ Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(dec!(1.0001)) } // +1.0001
+                         , Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(dec!(2.00002)) } // +2.0
+                         , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(1.5001)) } // -1.5001
+                         , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(10.0)) } // ignore
+                         , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // ignore
+                         , Transaction{ kind: Chargeback, client_id: 1, tx_id: 3,   amount: None } // ignore
+                         , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // hold 2.0
+                         , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // ignore
+                         , Transaction{ kind: Dispute,    client_id: 1, tx_id: 100, amount: None } // ignore
+                         , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // release 2.0
+                         , Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None } // hold 1.5001
+                         , Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None } // revert 1.5001, freeze
+                         , Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(dec!(2.0)) } // ignore
+                         ];
+        let vec2 = vec![ Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(dec!(5.0)) } // +5.0
+                         , Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(dec!(10.0)) } // +10.0
+                         , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(dec!(1.5)) } // -1.5
+                         , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(dec!(10.0)) } // -10.0
+                         , Transaction{ kind: Resolve,    client_id: 2, tx_id: 103, amount: None } // ignore
+                         , Transaction{ kind: Chargeback, client_id: 2, tx_id: 103, amount: None } // ignore
+                         , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // hold 10.0
+                         , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
+                         , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // ignore
+                         , Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None } // release 5.0
+                         , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
+                         , Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None } // revert 10.0, freeze
+                         , Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(dec!(20.0)) } // ignore
+                         ];
+        let (tx1, rx1) = mpsc::unbounded();
+        let (tx2, rx2) = mpsc::unbounded();
+        vec1.into_iter().for_each(|txn| tx1.clone().unbounded_send(txn).expect("Failed to send"));
+        vec2.into_iter().for_each(|txn| tx2.clone().unbounded_send(txn).expect("Failed to send"));
+        let map =
+            hash_map!( 1 => (tx1, rx1)
+                     , 2 => (tx2, rx2)
+                     );
         /*
          * When
          */
-        let txns = block_on(read_txns(&std::path::PathBuf::from(path)))?;
-
-        /*
-         * Then
-         */
-        // txns.sort_by_key(|(i, _)| *i);
-        let mut iter = txns.into_iter();
-        assert_eq!(iter.next(), Some(Transaction{ kind:      Deposit
-                                                , client_id: 1
-                                                , tx_id:     1
-                                                , amount:    Some(dec!(1.001))
-                                                }));
-        assert_eq!(iter.next(), Some(Transaction{ kind:      Withdrawal
-                                                , client_id: 2
-                                                , tx_id:     2
-                                                , amount:    Some(dec!(2.0002))
-                                                }));
-        assert_eq!(iter.next(), Some(Transaction{ kind:      Dispute
-                                                , client_id: 3
-                                                , tx_id:     3
-                                                , amount:    None
-                                                }));
-        assert_eq!(iter.next(), Some(Transaction{ kind:      Resolve
-                                                , client_id: 4
-                                                , tx_id:     4
-                                                , amount:    None
-                                                }));
-        assert_eq!(iter.next(), Some(Transaction{ kind: Chargeback
-                                                , client_id: 5
-                                                , tx_id:     5
-                                                , amount:    None
-                                                }));
-        assert_eq!(iter.next(), None);
-        Ok(())
-    }
-
-    #[test]
-    #[ignore]
-    fn test_txns_to_map() -> Result<(), Box<dyn std::error::Error>> {
-        /*
-         * Given
-         */
-        let mut file = NamedTempFile::new()?;
-        writeln!(file, "type,client,tx,amount
-                        deposit,1,1,1.0
-                        deposit,2,2,2.0
-                        deposit,1,3,2.0
-                        withdrawal,1,4,1.5
-                        withdrawal,2,5,3.0
-                        dispute,4,4,
-                        resolve,4,4,
-                        chargeback,5,5,
-                        bad line
-                        deposit,x,x,2.0")?;
-        let path = file.path().to_str().unwrap();
-
-        /*
-         * When
-         */
-        let txns = block_on(read_txns(&std::path::PathBuf::from(path)))?;
-        let txns_map = txns_to_map(txns);
-
-        /*
-         * Then
-         */
-        // txns_map.iter_mut().for_each(|(_k, v)| v.sort_by_key(|(i, _)| *i) );
-        assert_eq!(txns_map.get(&1), Some(&vec![ Transaction{ kind: Deposit, client_id: 1, tx_id: 1, amount: Some(dec!(1.0)) }
-                                                , Transaction{ kind: Deposit, client_id: 1, tx_id: 3, amount: Some(dec!(2.0)) }
-                                                , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4, amount: Some(dec!(1.5)) }
-                                                ]));
-        assert_eq!(txns_map.get(&2), Some(&vec![ Transaction{ kind: Deposit, client_id: 2, tx_id: 2, amount: Some(dec!(2.0)) }
-                                                , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 5, amount: Some(dec!(3.0)) }
-                                                ]));
-        assert_eq!(txns_map.get(&3), None);
-        assert_eq!(txns_map.get(&4), Some(&vec![ Transaction{ kind: Dispute, client_id: 4, tx_id: 4, amount: None }
-                                                , Transaction{ kind: Resolve, client_id: 4, tx_id: 4, amount: None }
-                                                ]));
-        assert_eq!(txns_map.get(&5), Some(&vec![ Transaction{ kind: Chargeback, client_id: 5, tx_id: 5, amount: None }
-                                                ]));
-        Ok(())
-    }
-
-    #[test]
-    #[ignore]
-    fn test_txns_map_to_accounts() {
-        /*
-         * Given
-         */
-        let txns =
-            hash_map!( 1 => vec![ Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(dec!(1.0001)) } // +1.0001
-                                , Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(dec!(2.00002)) } // +2.0
-                                , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(1.5001)) } // -1.5001
-                                , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(10.0)) } // ignore
-                                , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // ignore
-                                , Transaction{ kind: Chargeback, client_id: 1, tx_id: 3,   amount: None } // ignore
-                                , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // hold 2.0
-                                , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // ignore
-                                , Transaction{ kind: Dispute,    client_id: 1, tx_id: 100, amount: None } // ignore
-                                , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // release 2.0
-                                , Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None } // hold 1.5001
-                                , Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None } // revert 1.5001, freeze
-                                , Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(dec!(2.0)) } // ignore
-                                ]
-                     , 2 => vec![ Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(dec!(5.0)) } // +5.0
-                                , Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(dec!(10.0)) } // +10.0
-                                , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(dec!(1.5)) } // -1.5
-                                , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(dec!(10.0)) } // -10.0
-                                , Transaction{ kind: Resolve,    client_id: 2, tx_id: 103, amount: None } // ignore
-                                , Transaction{ kind: Chargeback, client_id: 2, tx_id: 103, amount: None } // ignore
-                                , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // hold 10.0
-                                , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
-                                , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // ignore
-                                , Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None } // release 5.0
-                                , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
-                                , Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None } // revert 10.0, freeze
-                                , Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(dec!(20.0)) } // ignore
-                                ]);
-        /*
-         * When
-         */
-        let mut accounts = block_on(txns_map_to_accounts(txns));
+        let mut accounts = block_on(streams_to_accounts(map));
 
         /*
          * Then
@@ -645,7 +461,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_deposit() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -683,7 +498,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -725,7 +539,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_dispute() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -787,7 +600,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_resolve() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -860,7 +672,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_chargeback() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -932,7 +743,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_withdraw_too_much() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -965,7 +775,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_dispute_deposit() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -1033,7 +842,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_resolve_many_times() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -1066,7 +874,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_chargeback_deposit() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -1100,7 +907,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_chargeback_withdrawal() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -1135,7 +941,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_withdraw_from_locked_account() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -1167,7 +972,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_deposit_to_locked_account() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
@@ -1199,7 +1003,6 @@ mod test {
     }
 
     #[test]
-    #[ignore]
     fn test_accounts_from_path_resolve_locked_account() -> Result<(), Box<dyn std::error::Error>> {
         /*
          * Given
