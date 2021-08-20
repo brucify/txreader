@@ -1,7 +1,7 @@
 use crate::tx::TransactionKind::*;
 use anyhow::Context;
 use csv::{ReaderBuilder, Trim, WriterBuilder};
-use log::debug;
+use log::{debug, info};
 use rayon::prelude::*;
 use rand::{thread_rng, Rng};
 use rust_decimal::prelude::*;
@@ -79,18 +79,32 @@ pub async fn read(path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
 /// Reads the transactions from a file and writes the serialized results to
 /// a given `std::io::Write` writer.
 pub async fn read_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -> Result<(), anyhow::Error> {
+    let now = std::time::Instant::now();
     let accounts = accounts_from_path(path).await?;
+    info!("accounts_from_path done. Elapsed: {:.2?}", now.elapsed());
+
+    let now = std::time::Instant::now();
     print_accounts_with(writer, &accounts).await;
+    info!("print_accounts_with done. Elapsed: {:.2?}", now.elapsed());
     Ok(())
 }
 
 /// Reads the transactions from a file and returns `Vec<Account>` that
 /// contains a list of parsed accounts.
 pub async fn accounts_from_path(path: &std::path::PathBuf) -> Result<Vec<Account>, anyhow::Error> {
+    let now = std::time::Instant::now();
     let txns = read_txns(path).await
         .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
+    info!("read_txns done. Elapsed: {:.2?}", now.elapsed());
+
+    let now = std::time::Instant::now();
     let txns_map = txns_to_map(txns);
+    info!("txns_to_map done. Elapsed: {:.2?}", now.elapsed());
+
+    let now = std::time::Instant::now();
     let accounts = txns_map_to_accounts(txns_map).await;
+    info!("txns_map_to_accounts done. Elapsed: {:.2?}", now.elapsed());
+
     Ok(accounts)
 }
 
@@ -148,16 +162,20 @@ async fn print_txns_with(writer: &mut impl io::Write, txns: &Vec<Transaction>) {
 
 /// Reads the file from path into an ordered `Vec<Transaction>`.
 async fn read_txns(path: &std::path::PathBuf) -> io::Result<Vec<Transaction>> {
+    let now = std::time::Instant::now();
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
         .delimiter(b',')
         .trim(Trim::All)
         .from_path(path)?;
+    info!("ReaderBuilder::from_path done. Elapsed: {:.2?}", now.elapsed());
 
+    let now = std::time::Instant::now();
     let all_txns: Vec<Transaction> =
         rdr.deserialize::<Transaction>()
             .filter_map(|record| record.ok())
             .collect();
+    info!("reader::deserialize done. Elapsed: {:.2?}", now.elapsed());
 
     Ok(all_txns)
 }
