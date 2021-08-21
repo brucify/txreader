@@ -1,7 +1,9 @@
 use anyhow::Context;
 use crate::tx::TransactionKind::*;
 use csv::{ReaderBuilder, Trim, WriterBuilder};
-use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use futures::channel::mpsc::{self, UnboundedReceiver};
+use futures::executor::ThreadPool;
+use futures::task::SpawnExt;
 use futures::{StreamExt, future};
 use log::{debug, info};
 use rand::seq::SliceRandom;
@@ -94,11 +96,13 @@ pub async fn read_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -
 /// contains a list of parsed accounts.
 pub async fn accounts_from_path(path: &std::path::PathBuf) -> Result<Vec<Account>, anyhow::Error> {
     let now = std::time::Instant::now();
-    let txns_map = read_to_streams(path).await
+    // let txns_map = read_to_streams(path).await
+    //     .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
+    // info!("read_to_streams done. Elapsed: {:.2?}", now.elapsed());
+    // let now = std::time::Instant::now();
+    // let accounts = streams_to_accounts(txns_map).await;
+    let accounts = read_to_streams(path).await
         .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
-    info!("read_to_streams done. Elapsed: {:.2?}", now.elapsed());
-    let now = std::time::Instant::now();
-    let accounts = streams_to_accounts(txns_map).await;
     info!("streams_to_accounts done. Elapsed: {:.2?}", now.elapsed());
     Ok(accounts)
 }
@@ -160,7 +164,10 @@ async fn print_txns_with(writer: &mut impl io::Write, txns: &Vec<Transaction>) {
 /// and the value is a tuple of
 /// `(UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)`
 /// produced by `mpsc::unbounded::<Transaction>()`.
-async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<HashMap<u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)>> {
+// async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<HashMap<u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)>> {
+async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<Vec<Account>> {
+    let pool = ThreadPool::new()?;
+
     let now = std::time::Instant::now();
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
@@ -176,27 +183,49 @@ async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<HashMap<u16, (
             .fold(
                 HashMap::new(),
                 | mut map, txn: Transaction| {
-                    let (tx, _rx) =
-                        map.entry(txn.client_id)
-                            .or_insert(mpsc::unbounded::<Transaction>());
+                    let client_id = txn.client_id;
+                    let (tx, _handle) =
+                        map.entry(client_id)
+                            .or_insert_with(|| {
+                                let (tx, rx) = mpsc::unbounded::<Transaction>();
+                                let handle =
+                                    pool.spawn_with_handle(stream_to_account(client_id, rx))
+                                        .expect("Failed to spawn");
+                                (tx, handle)
+                            });
                     tx.unbounded_send(txn).expect("Failed to send");
                     map
                 });
     info!("reader::deserialize done. Elapsed: {:.2?}", now.elapsed());
 
-    Ok(map)
+    let now = std::time::Instant::now();
+    let handles =
+        map.into_iter()
+            .fold(
+                Vec::new(),
+                | mut vec, (_, (tx, handle))| {
+                    drop(tx);
+                    vec.push(handle);
+                    vec
+                }
+            );
+
+    let accounts = future::join_all(handles).await;
+    info!("future::join_all(handles) done. Elapsed: {:.2?}", now.elapsed());
+
+    Ok(accounts)
 }
 
-/// Reads the `HashMap` in parallel, and returns a list of
-/// accounts as `Vec<Account>`.
-async fn streams_to_accounts(map: HashMap<u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)>) -> Vec<Account> {
-    let futures = map.into_iter()
-        .map(| (client_id, (tx, rx)): (u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)) | {
-            drop(tx);
-            stream_to_account(client_id, rx)
-        });
-    future::join_all(futures).await
-}
+// /// Reads the `HashMap` in parallel, and returns a list of
+// /// accounts as `Vec<Account>`.
+// async fn streams_to_accounts(map: HashMap<u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)>) -> Vec<Account> {
+//     let futures = map.into_iter()
+//         .map(| (client_id, (tx, rx)): (u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)) | {
+//             drop(tx);
+//             stream_to_account(client_id, rx)
+//         });
+//     future::join_all(futures).await
+// }
 
 async fn stream_to_account(client_id: u16, rx: UnboundedReceiver<Transaction>) -> Account {
     let (account, _) =
@@ -395,70 +424,70 @@ mod test {
         Ok(())
     }
 
-    #[test]
-    fn test_streams_to_accounts() {
-        /*
-         * Given
-         */
-        let vec1 = vec![ Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(dec!(1.0001)) } // +1.0001
-                         , Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(dec!(2.00002)) } // +2.0
-                         , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(1.5001)) } // -1.5001
-                         , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(10.0)) } // ignore
-                         , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // ignore
-                         , Transaction{ kind: Chargeback, client_id: 1, tx_id: 3,   amount: None } // ignore
-                         , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // hold 2.0
-                         , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // ignore
-                         , Transaction{ kind: Dispute,    client_id: 1, tx_id: 100, amount: None } // ignore
-                         , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // release 2.0
-                         , Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None } // hold 1.5001
-                         , Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None } // revert 1.5001, freeze
-                         , Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(dec!(2.0)) } // ignore
-                         ];
-        let vec2 = vec![ Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(dec!(5.0)) } // +5.0
-                         , Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(dec!(10.0)) } // +10.0
-                         , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(dec!(1.5)) } // -1.5
-                         , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(dec!(10.0)) } // -10.0
-                         , Transaction{ kind: Resolve,    client_id: 2, tx_id: 103, amount: None } // ignore
-                         , Transaction{ kind: Chargeback, client_id: 2, tx_id: 103, amount: None } // ignore
-                         , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // hold 10.0
-                         , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
-                         , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // ignore
-                         , Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None } // release 5.0
-                         , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
-                         , Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None } // revert 10.0, freeze
-                         , Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(dec!(20.0)) } // ignore
-                         ];
-        let (tx1, rx1) = mpsc::unbounded();
-        let (tx2, rx2) = mpsc::unbounded();
-        vec1.into_iter().for_each(|txn| tx1.clone().unbounded_send(txn).expect("Failed to send"));
-        vec2.into_iter().for_each(|txn| tx2.clone().unbounded_send(txn).expect("Failed to send"));
-        let map =
-            hash_map!( 1 => (tx1, rx1)
-                     , 2 => (tx2, rx2)
-                     );
-        /*
-         * When
-         */
-        let mut accounts = block_on(streams_to_accounts(map));
-
-        /*
-         * Then
-         */
-        accounts.sort_by_key(|a| a.client_id);
-        assert_eq!(accounts, vec![ Account{ client_id: 1
-                                          , available: dec!(3.0001)
-                                          , held:      dec!(0.0)
-                                          , total:     dec!(3.0001)
-                                          , locked:    true
-                                          }
-                                 , Account{ client_id: 2
-                                          , available: dec!(-11.5)
-                                          , held:      dec!(5.0)
-                                          , total:     dec!(-6.5)
-                                          , locked:    true
-                                          }
-                                 ]);
-    }
+    // #[test]
+    // fn test_streams_to_accounts() {
+    //     /*
+    //      * Given
+    //      */
+    //     let vec1 = vec![ Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(dec!(1.0001)) } // +1.0001
+    //                      , Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(dec!(2.00002)) } // +2.0
+    //                      , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(1.5001)) } // -1.5001
+    //                      , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(10.0)) } // ignore
+    //                      , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // ignore
+    //                      , Transaction{ kind: Chargeback, client_id: 1, tx_id: 3,   amount: None } // ignore
+    //                      , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // hold 2.0
+    //                      , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // ignore
+    //                      , Transaction{ kind: Dispute,    client_id: 1, tx_id: 100, amount: None } // ignore
+    //                      , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // release 2.0
+    //                      , Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None } // hold 1.5001
+    //                      , Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None } // revert 1.5001, freeze
+    //                      , Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(dec!(2.0)) } // ignore
+    //                      ];
+    //     let vec2 = vec![ Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(dec!(5.0)) } // +5.0
+    //                      , Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(dec!(10.0)) } // +10.0
+    //                      , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(dec!(1.5)) } // -1.5
+    //                      , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(dec!(10.0)) } // -10.0
+    //                      , Transaction{ kind: Resolve,    client_id: 2, tx_id: 103, amount: None } // ignore
+    //                      , Transaction{ kind: Chargeback, client_id: 2, tx_id: 103, amount: None } // ignore
+    //                      , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // hold 10.0
+    //                      , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
+    //                      , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // ignore
+    //                      , Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None } // release 5.0
+    //                      , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
+    //                      , Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None } // revert 10.0, freeze
+    //                      , Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(dec!(20.0)) } // ignore
+    //                      ];
+    //     let (tx1, rx1) = mpsc::unbounded();
+    //     let (tx2, rx2) = mpsc::unbounded();
+    //     vec1.into_iter().for_each(|txn| tx1.clone().unbounded_send(txn).expect("Failed to send"));
+    //     vec2.into_iter().for_each(|txn| tx2.clone().unbounded_send(txn).expect("Failed to send"));
+    //     let map =
+    //         hash_map!( 1 => (tx1, rx1)
+    //                  , 2 => (tx2, rx2)
+    //                  );
+    //     /*
+    //      * When
+    //      */
+    //     let mut accounts = block_on(streams_to_accounts(map));
+    //
+    //     /*
+    //      * Then
+    //      */
+    //     accounts.sort_by_key(|a| a.client_id);
+    //     assert_eq!(accounts, vec![ Account{ client_id: 1
+    //                                       , available: dec!(3.0001)
+    //                                       , held:      dec!(0.0)
+    //                                       , total:     dec!(3.0001)
+    //                                       , locked:    true
+    //                                       }
+    //                              , Account{ client_id: 2
+    //                                       , available: dec!(-11.5)
+    //                                       , held:      dec!(5.0)
+    //                                       , total:     dec!(-6.5)
+    //                                       , locked:    true
+    //                                       }
+    //                              ]);
+    // }
 
     #[test]
     fn test_accounts_from_path_deposit() -> Result<(), Box<dyn std::error::Error>> {
