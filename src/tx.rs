@@ -177,9 +177,15 @@ async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<Vec<Account>> 
     info!("ReaderBuilder::from_path done. Elapsed: {:.2?}", now.elapsed());
 
     let now = std::time::Instant::now();
-    let map =
+    let txns =
         rdr.deserialize::<Transaction>()
             .filter_map(|record| record.ok())
+            .collect::<Vec<Transaction>>();
+    info!("reader::deserialize done. Elapsed: {:.2?}", now.elapsed());
+
+    let now = std::time::Instant::now();
+    let map =
+        txns.into_iter()
             .fold(
                 HashMap::new(),
                 | mut map, txn: Transaction| {
@@ -196,7 +202,7 @@ async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<Vec<Account>> 
                     tx.unbounded_send(txn).expect("Failed to send");
                     map
                 });
-    info!("reader::deserialize done. Elapsed: {:.2?}", now.elapsed());
+    info!("fold done. Elapsed: {:.2?}", now.elapsed());
 
     let now = std::time::Instant::now();
     let handles =
