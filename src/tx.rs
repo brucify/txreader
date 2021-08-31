@@ -1,7 +1,7 @@
 use anyhow::Context;
 use crate::tx::TransactionKind::*;
 use csv::{ReaderBuilder, Trim, WriterBuilder};
-use futures::channel::mpsc::{self, UnboundedReceiver};
+use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
 use futures::executor::ThreadPool;
 use futures::task::SpawnExt;
 use futures::{StreamExt, future};
@@ -13,6 +13,7 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Error, ErrorKind::{InvalidInput}};
+use futures::future::RemoteHandle;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 struct Transaction {
@@ -184,38 +185,53 @@ async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<Vec<Account>> 
     info!("reader::deserialize done. Elapsed: {:.2?}", now.elapsed());
 
     let now = std::time::Instant::now();
-    let map =
-        txns.into_iter()
+    let (all_tx, all_rx) =
+        txns.iter()
             .fold(
-                HashMap::new(),
-                | mut map, txn: Transaction| {
+                (HashMap::new(), Vec::new()),
+                | (mut map, mut vec): (HashMap<u16, UnboundedSender<Transaction>>, Vec<(u16, UnboundedReceiver<Transaction>)>)
+                , txn: &Transaction
+                | {
                     let client_id = txn.client_id;
-                    let (tx, _handle) =
-                        map.entry(client_id)
-                            .or_insert_with(|| {
-                                let (tx, rx) = mpsc::unbounded::<Transaction>();
-                                let handle =
-                                    pool.spawn_with_handle(stream_to_account(client_id, rx))
-                                        .expect("Failed to spawn");
-                                (tx, handle)
-                            });
-                    tx.unbounded_send(txn).expect("Failed to send");
-                    map
-                });
-    info!("fold done. Elapsed: {:.2?}", now.elapsed());
+                    map.entry(client_id)
+                        .or_insert_with(|| {
+                            let (tx, rx) = mpsc::unbounded::<Transaction>();
+                            vec.push((client_id, rx));
+                            tx
+                        });
+                    (map, vec)
+                }
+            );
+    info!("mpsc channels creation done. Elapsed: {:.2?}", now.elapsed());
 
     let now = std::time::Instant::now();
     let handles =
-        map.into_iter()
-            .fold(
-                Vec::new(),
-                | mut vec, (_, (tx, handle))| {
-                    drop(tx);
-                    vec.push(handle);
-                    vec
-                }
-            );
+        all_rx.into_iter()
+            .map(|(client_id, rx)| {
+                let handle =
+                    pool.spawn_with_handle(stream_to_account(client_id, rx))
+                        .expect("Failed to spawn");
+                handle
+            })
+            .collect::<Vec<RemoteHandle<Account>>>();
+    info!("map spawn_with_handle done. Elapsed: {:.2?}", now.elapsed());
 
+    let now = std::time::Instant::now();
+    txns.into_iter()
+        .for_each(
+            | txn: Transaction | {
+                let client_id = txn.client_id;
+                if let Some(tx) = all_tx.get(&client_id) {
+                    tx.unbounded_send(txn).expect("Failed to send");
+                }
+            });
+    info!("for_each unbounded_send done. Elapsed: {:.2?}", now.elapsed());
+
+    let now = std::time::Instant::now();
+    all_tx.into_iter().for_each(|(_, tx)| drop(tx));
+    info!("for_each drop(tx) done. Elapsed: {:.2?}", now.elapsed());
+
+    let now = std::time::Instant::now();
     let accounts = future::join_all(handles).await;
     info!("future::join_all(handles) done. Elapsed: {:.2?}", now.elapsed());
 
