@@ -1,10 +1,10 @@
 use anyhow::Context;
 use crate::tx::TransactionKind::*;
 use csv::{ReaderBuilder, Trim, WriterBuilder};
-use futures::channel::mpsc::{self, UnboundedReceiver, UnboundedSender};
+use std::sync::mpsc::{self, Receiver, Sender};
 use futures::executor::ThreadPool;
+use futures::future::{self, RemoteHandle};
 use futures::task::SpawnExt;
-use futures::{StreamExt, future};
 use log::{debug, info};
 use rand::seq::SliceRandom;
 use rand::{thread_rng, Rng};
@@ -13,7 +13,6 @@ use rust_decimal_macros::dec;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::{self, Error, ErrorKind::{InvalidInput}};
-use futures::future::RemoteHandle;
 
 #[derive(Debug, Deserialize, Serialize, PartialEq)]
 struct Transaction {
@@ -96,15 +95,29 @@ pub async fn read_with(writer: &mut impl io::Write, path: &std::path::PathBuf) -
 /// Reads the transactions from a file and returns `Vec<Account>` that
 /// contains a list of parsed accounts.
 pub async fn accounts_from_path(path: &std::path::PathBuf) -> Result<Vec<Account>, anyhow::Error> {
+    let pool = ThreadPool::new()
+        .with_context(|| format!("Could not create thread pool"))?;
+
     let now = std::time::Instant::now();
-    // let txns_map = read_to_streams(path).await
-    //     .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
-    // info!("read_to_streams done. Elapsed: {:.2?}", now.elapsed());
-    // let now = std::time::Instant::now();
-    // let accounts = streams_to_accounts(txns_map).await;
-    let accounts = read_to_streams(path).await
-        .with_context(|| format!("Could not read transactions from file `{:?}`", path))?;
-    info!("streams_to_accounts done. Elapsed: {:.2?}", now.elapsed());
+    let txns = deserialize(path)
+        .with_context(|| format!("Could not deserialize file `{:?}`", path))?;
+    info!("deserialize done. Elapsed: {:.2?}", now.elapsed());
+
+    let now = std::time::Instant::now();
+    let (all_tx, all_rx) = channels(&txns);
+    info!("mpsc channels creation done. Elapsed: {:.2?}", now.elapsed());
+
+    let now = std::time::Instant::now();
+    let send = send(txns, all_tx);
+    pool.spawn_ok(send);
+    info!("spawn sender done. Elapsed: {:.2?}", now.elapsed());
+
+    let now = std::time::Instant::now();
+    let receive = receive(all_rx);
+    let accounts = receive.await
+        .with_context(|| format!("Could not receive accounts"))?;
+    info!("receive.await? done. Elapsed: {:.2?}", now.elapsed());
+
     Ok(accounts)
 }
 
@@ -160,15 +173,8 @@ async fn print_txns_with(writer: &mut impl io::Write, txns: &Vec<Transaction>) {
     txns.iter().for_each(|txn| wtr.serialize(txn).unwrap());
 }
 
-/// Reads the file from path, and returns
-/// a `HashMap` where the key is a `u16` client id,
-/// and the value is a tuple of
-/// `(UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)`
-/// produced by `mpsc::unbounded::<Transaction>()`.
-// async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<HashMap<u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)>> {
-async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<Vec<Account>> {
-    let pool = ThreadPool::new()?;
-
+/// Reads the file from path into an ordered `Vec<Transaction>`.
+fn deserialize(path: &std::path::PathBuf) -> io::Result<Vec<Transaction>> {
     let now = std::time::Instant::now();
     let mut rdr = ReaderBuilder::new()
         .has_headers(true)
@@ -184,105 +190,92 @@ async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<Vec<Account>> 
             .collect::<Vec<Transaction>>();
     info!("reader::deserialize done. Elapsed: {:.2?}", now.elapsed());
 
+    Ok(txns)
+}
+
+/// Creates a `mpsc::channel` per client. Returns a `HashMap<u16, Sender<Transaction>>`
+/// for all the senders and a `Vec<(u16, Receiver<Transaction>)>` for all the receivers,
+/// where the `u16` is the client ID.
+fn channels(txns: &Vec<Transaction>) -> (HashMap<u16, Sender<Transaction>>, Vec<(u16, Receiver<Transaction>)>) {
+    txns.iter()
+        .fold(
+            (HashMap::new(), Vec::new()),
+            | (mut map, mut vec): (HashMap<u16, Sender<Transaction>>, Vec<(u16, Receiver<Transaction>)>)
+              , txn: &Transaction
+            | {
+                let client_id = txn.client_id;
+                map.entry(client_id)
+                    .or_insert_with(|| {
+                        let (tx, rx) = mpsc::channel::<Transaction>();
+                        vec.push((client_id, rx));
+                        tx
+                    });
+                (map, vec)
+            }
+        )
+}
+
+/// Go through a `Vec<Transaction>` and send each transaction through its `Sender<Transaction>`
+/// that belongs to the `client_id`
+async fn send(txns: Vec<Transaction>, all_tx: HashMap<u16, Sender<Transaction>>) {
     //
-    // Create mpsc channels for each client_id
+    // go through all txns, look up client_id and send to tx
     //
     let now = std::time::Instant::now();
-    let (all_tx, all_rx) =
-        txns.iter()
-            .fold(
-                (HashMap::new(), Vec::new()),
-                | (mut map, mut vec): (HashMap<u16, UnboundedSender<Transaction>>, Vec<(u16, UnboundedReceiver<Transaction>)>)
-                , txn: &Transaction
-                | {
-                    let client_id = txn.client_id;
-                    map.entry(client_id)
-                        .or_insert_with(|| {
-                            let (tx, rx) = mpsc::unbounded::<Transaction>();
-                            vec.push((client_id, rx));
-                            tx
-                        });
-                    (map, vec)
+    txns.into_iter()
+        .for_each(
+            |txn: Transaction| {
+                let client_id = txn.client_id;
+                if let Some(tx) = all_tx.get(&client_id) {
+                    tx.send(txn).expect("Failed to send");
                 }
-            );
-    info!("mpsc channels creation done. Elapsed: {:.2?}", now.elapsed());
+            });
+    info!("for_each tx.send done. Elapsed: {:.2?}", now.elapsed());
 
-
-    let send = async move {
-        //
-        // go through all txns, look up client_id and send to tx
-        //
-        let now = std::time::Instant::now();
-        txns.into_iter()
-            .for_each(
-                |txn: Transaction| {
-                    let client_id = txn.client_id;
-                    if let Some(tx) = all_tx.get(&client_id) {
-                        tx.unbounded_send(txn).expect("Failed to send");
-                    }
-                });
-        info!("for_each unbounded_send done. Elapsed: {:.2?}", now.elapsed());
-
-        //
-        // close all tx
-        //
-        let now = std::time::Instant::now();
-        all_tx.into_iter().for_each(|(_, tx)| tx.close_channel());
-        info!("for_each drop(tx) done. Elapsed: {:.2?}", now.elapsed());
-
-        ()
-    };
-
-    let receive = async move {
-        //
-        // spawn handles to receive from each rx
-        //
-        let now = std::time::Instant::now();
-        let handles =
-            all_rx.into_iter()
-                .map(|(client_id, rx)| {
-                    let handle =
-                        pool.spawn_with_handle(stream_to_account(client_id, rx))
-                            .expect("Failed to spawn");
-                    handle
-                })
-                .collect::<Vec<RemoteHandle<Account>>>();
-        info!("map spawn_with_handle done. Elapsed: {:.2?}", now.elapsed());
-
-        //
-        // wait for all rx to finish receiving
-        //
-        let now = std::time::Instant::now();
-        let accounts = future::join_all(handles).await;
-        info!("future::join_all(handles) done. Elapsed: {:.2?}", now.elapsed());
-        accounts
-    };
-
+    //
+    // drop all tx
+    //
     let now = std::time::Instant::now();
-    let (_, accounts) = futures::future::join(send, receive).await;
-    info!("future::join(send, receive) done. Elapsed: {:.2?}", now.elapsed());
+    all_tx.into_iter().for_each(|(_, tx)| drop(tx));
+    info!("drop all tx done. Elapsed: {:.2?}", now.elapsed());
+}
 
+/// Use `thread_pool::ThreadPool` to spawn one task per `Receiver<Transaction>` and
+/// wait for all rx to finish receiving, then returns a `Vec<Account>`.
+async fn receive(all_rx: Vec<(u16, Receiver<Transaction>)>) -> io::Result<Vec<Account>> {
+    let pool = ThreadPool::new()?;
+    //
+    // spawn handles to receive from each rx
+    //
+    let now = std::time::Instant::now();
+    let handles =
+        all_rx.into_iter()
+            .map(|(client_id, rx)| {
+                let handle =
+                    pool.spawn_with_handle(to_account(client_id, rx))
+                        .expect("Failed to spawn");
+                handle
+            })
+            .collect::<Vec<RemoteHandle<Account>>>();
+    info!("map spawn_with_handle done. Elapsed: {:.2?}", now.elapsed());
+
+    //
+    // wait for all rx to finish receiving
+    //
+    let now = std::time::Instant::now();
+    let accounts = future::join_all(handles).await;
+    info!("future::join_all(handles) done. Elapsed: {:.2?}", now.elapsed());
     Ok(accounts)
 }
 
-// /// Reads the `HashMap` in parallel, and returns a list of
-// /// accounts as `Vec<Account>`.
-// async fn streams_to_accounts(map: HashMap<u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)>) -> Vec<Account> {
-//     let futures = map.into_iter()
-//         .map(| (client_id, (tx, rx)): (u16, (UnboundedSender<Transaction>, UnboundedReceiver<Transaction>)) | {
-//             drop(tx);
-//             stream_to_account(client_id, rx)
-//         });
-//     future::join_all(futures).await
-// }
 
-async fn stream_to_account(client_id: u16, rx: UnboundedReceiver<Transaction>) -> Account {
+async fn to_account(client_id: u16, rx: Receiver<Transaction>) -> Account {
     let (account, _) =
-        rx.fold(
+        rx.into_iter().fold(
             (Account::new(client_id), HashMap::new()),
             | (mut account, mut handled)//: (Account, HashMap<u32, Vec<&Transaction>>)
             ,  txn//: Transaction
-            | async move {
+            | {
                 let txn_id = txn.tx_id;
                 match handle_txn(&mut account, &handled, &txn) {
                     // only insert when txn is ok
@@ -291,8 +284,7 @@ async fn stream_to_account(client_id: u16, rx: UnboundedReceiver<Transaction>) -
                     _ => debug!("Ignoring invalid transaction: {:?}", txn)
                 };
                 (account, handled)
-            })
-            .await;
+            });
     account
 }
 
@@ -472,71 +464,6 @@ mod test {
         assert_eq!(true, lines.all(|l| expected.contains(&l)));
         Ok(())
     }
-
-    // #[test]
-    // fn test_streams_to_accounts() {
-    //     /*
-    //      * Given
-    //      */
-    //     let vec1 = vec![ Transaction{ kind: Deposit,    client_id: 1, tx_id: 1,   amount: Some(dec!(1.0001)) } // +1.0001
-    //                      , Transaction{ kind: Deposit,    client_id: 1, tx_id: 3,   amount: Some(dec!(2.00002)) } // +2.0
-    //                      , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(1.5001)) } // -1.5001
-    //                      , Transaction{ kind: Withdrawal, client_id: 1, tx_id: 4,   amount: Some(dec!(10.0)) } // ignore
-    //                      , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // ignore
-    //                      , Transaction{ kind: Chargeback, client_id: 1, tx_id: 3,   amount: None } // ignore
-    //                      , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // hold 2.0
-    //                      , Transaction{ kind: Dispute,    client_id: 1, tx_id: 3,   amount: None } // ignore
-    //                      , Transaction{ kind: Dispute,    client_id: 1, tx_id: 100, amount: None } // ignore
-    //                      , Transaction{ kind: Resolve,    client_id: 1, tx_id: 3,   amount: None } // release 2.0
-    //                      , Transaction{ kind: Dispute,    client_id: 1, tx_id: 4,   amount: None } // hold 1.5001
-    //                      , Transaction{ kind: Chargeback, client_id: 1, tx_id: 4,   amount: None } // revert 1.5001, freeze
-    //                      , Transaction{ kind: Deposit,    client_id: 1, tx_id: 5,   amount: Some(dec!(2.0)) } // ignore
-    //                      ];
-    //     let vec2 = vec![ Transaction{ kind: Deposit,    client_id: 2, tx_id: 101, amount: Some(dec!(5.0)) } // +5.0
-    //                      , Transaction{ kind: Deposit,    client_id: 2, tx_id: 102, amount: Some(dec!(10.0)) } // +10.0
-    //                      , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 103, amount: Some(dec!(1.5)) } // -1.5
-    //                      , Transaction{ kind: Withdrawal, client_id: 2, tx_id: 104, amount: Some(dec!(10.0)) } // -10.0
-    //                      , Transaction{ kind: Resolve,    client_id: 2, tx_id: 103, amount: None } // ignore
-    //                      , Transaction{ kind: Chargeback, client_id: 2, tx_id: 103, amount: None } // ignore
-    //                      , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // hold 10.0
-    //                      , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
-    //                      , Transaction{ kind: Dispute,    client_id: 2, tx_id: 102, amount: None } // ignore
-    //                      , Transaction{ kind: Resolve,    client_id: 2, tx_id: 101, amount: None } // release 5.0
-    //                      , Transaction{ kind: Dispute,    client_id: 2, tx_id: 101, amount: None } // hold 5.0
-    //                      , Transaction{ kind: Chargeback, client_id: 2, tx_id: 102, amount: None } // revert 10.0, freeze
-    //                      , Transaction{ kind: Deposit,    client_id: 2, tx_id: 105, amount: Some(dec!(20.0)) } // ignore
-    //                      ];
-    //     let (tx1, rx1) = mpsc::unbounded();
-    //     let (tx2, rx2) = mpsc::unbounded();
-    //     vec1.into_iter().for_each(|txn| tx1.clone().unbounded_send(txn).expect("Failed to send"));
-    //     vec2.into_iter().for_each(|txn| tx2.clone().unbounded_send(txn).expect("Failed to send"));
-    //     let map =
-    //         hash_map!( 1 => (tx1, rx1)
-    //                  , 2 => (tx2, rx2)
-    //                  );
-    //     /*
-    //      * When
-    //      */
-    //     let mut accounts = block_on(streams_to_accounts(map));
-    //
-    //     /*
-    //      * Then
-    //      */
-    //     accounts.sort_by_key(|a| a.client_id);
-    //     assert_eq!(accounts, vec![ Account{ client_id: 1
-    //                                       , available: dec!(3.0001)
-    //                                       , held:      dec!(0.0)
-    //                                       , total:     dec!(3.0001)
-    //                                       , locked:    true
-    //                                       }
-    //                              , Account{ client_id: 2
-    //                                       , available: dec!(-11.5)
-    //                                       , held:      dec!(5.0)
-    //                                       , total:     dec!(-6.5)
-    //                                       , locked:    true
-    //                                       }
-    //                              ]);
-    // }
 
     #[test]
     fn test_accounts_from_path_deposit() -> Result<(), Box<dyn std::error::Error>> {
