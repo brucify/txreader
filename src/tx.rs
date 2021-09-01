@@ -49,6 +49,7 @@ enum TransactionKind {
 
 #[derive(Debug, Serialize, PartialEq)]
 pub struct Account {
+    #[serde(rename = "client")]
     client_id:  u16,
     available:  Decimal,
     held:       Decimal,
@@ -390,7 +391,7 @@ mod test {
         let mut result = Vec::new();
         block_on(read_with(&mut result, path))?;
         let mut lines = std::str::from_utf8(&result)?.lines();
-        let expected = vec![ "client_id,available,held,total,locked"
+        let expected = vec![ "client,available,held,total,locked"
                            , "1,1.4996,0.0,1.4996,false"
                            , "2,2,0.0,2,false"
                            , "4,0.0,0.0,0.0,false"
