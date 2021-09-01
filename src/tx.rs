@@ -184,6 +184,9 @@ async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<Vec<Account>> 
             .collect::<Vec<Transaction>>();
     info!("reader::deserialize done. Elapsed: {:.2?}", now.elapsed());
 
+    //
+    // Create mpsc channels for each client_id
+    //
     let now = std::time::Instant::now();
     let (all_tx, all_rx) =
         txns.iter()
@@ -204,36 +207,60 @@ async fn read_to_streams(path: &std::path::PathBuf) -> io::Result<Vec<Account>> 
             );
     info!("mpsc channels creation done. Elapsed: {:.2?}", now.elapsed());
 
-    let now = std::time::Instant::now();
-    let handles =
-        all_rx.into_iter()
-            .map(|(client_id, rx)| {
-                let handle =
-                    pool.spawn_with_handle(stream_to_account(client_id, rx))
-                        .expect("Failed to spawn");
-                handle
-            })
-            .collect::<Vec<RemoteHandle<Account>>>();
-    info!("map spawn_with_handle done. Elapsed: {:.2?}", now.elapsed());
+
+    let send = async move {
+        //
+        // go through all txns, look up client_id and send to tx
+        //
+        let now = std::time::Instant::now();
+        txns.into_iter()
+            .for_each(
+                |txn: Transaction| {
+                    let client_id = txn.client_id;
+                    if let Some(tx) = all_tx.get(&client_id) {
+                        tx.unbounded_send(txn).expect("Failed to send");
+                    }
+                });
+        info!("for_each unbounded_send done. Elapsed: {:.2?}", now.elapsed());
+
+        //
+        // close all tx
+        //
+        let now = std::time::Instant::now();
+        all_tx.into_iter().for_each(|(_, tx)| tx.close_channel());
+        info!("for_each drop(tx) done. Elapsed: {:.2?}", now.elapsed());
+
+        ()
+    };
+
+    let receive = async move {
+        //
+        // spawn handles to receive from each rx
+        //
+        let now = std::time::Instant::now();
+        let handles =
+            all_rx.into_iter()
+                .map(|(client_id, rx)| {
+                    let handle =
+                        pool.spawn_with_handle(stream_to_account(client_id, rx))
+                            .expect("Failed to spawn");
+                    handle
+                })
+                .collect::<Vec<RemoteHandle<Account>>>();
+        info!("map spawn_with_handle done. Elapsed: {:.2?}", now.elapsed());
+
+        //
+        // wait for all rx to finish receiving
+        //
+        let now = std::time::Instant::now();
+        let accounts = future::join_all(handles).await;
+        info!("future::join_all(handles) done. Elapsed: {:.2?}", now.elapsed());
+        accounts
+    };
 
     let now = std::time::Instant::now();
-    txns.into_iter()
-        .for_each(
-            | txn: Transaction | {
-                let client_id = txn.client_id;
-                if let Some(tx) = all_tx.get(&client_id) {
-                    tx.unbounded_send(txn).expect("Failed to send");
-                }
-            });
-    info!("for_each unbounded_send done. Elapsed: {:.2?}", now.elapsed());
-
-    let now = std::time::Instant::now();
-    all_tx.into_iter().for_each(|(_, tx)| drop(tx));
-    info!("for_each drop(tx) done. Elapsed: {:.2?}", now.elapsed());
-
-    let now = std::time::Instant::now();
-    let accounts = future::join_all(handles).await;
-    info!("future::join_all(handles) done. Elapsed: {:.2?}", now.elapsed());
+    let (_, accounts) = futures::future::join(send, receive).await;
+    info!("future::join(send, receive) done. Elapsed: {:.2?}", now.elapsed());
 
     Ok(accounts)
 }
